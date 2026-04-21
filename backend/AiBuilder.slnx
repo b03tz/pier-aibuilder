@@ -2,5 +2,6 @@
   <Folder Name="/Generated/">
     <Project Path="Generated/PlexxerClient.AiBuilder.csproj" />
   </Folder>
+  <Project Path="AiBuilder.Api/AiBuilder.Api.csproj" />
   <Project Path="SmokeTest/SmokeTest.csproj" />
 </Solution>
