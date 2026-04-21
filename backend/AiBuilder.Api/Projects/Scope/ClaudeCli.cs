@@ -16,7 +16,8 @@ public sealed class ClaudeCli
         string? AppendSystemPrompt = null,
         bool DangerouslySkipPermissions = false,
         string? DisallowedTools = null,
-        TimeSpan? Timeout = null);
+        TimeSpan? Timeout = null,
+        bool StreamJson = false);
 
     public async Task<RunResult> RunAsync(RunOptions opts, CancellationToken ct)
     {
@@ -39,7 +40,18 @@ public sealed class ClaudeCli
         CancellationToken ct)
     {
         var exe = Environment.GetEnvironmentVariable("CLAUDE_CLI_PATH") ?? "claude";
-        var args = new List<string> { "-p", opts.Prompt, "--output-format", "text" };
+        var args = new List<string> { "-p", opts.Prompt };
+        if (opts.StreamJson)
+        {
+            args.Add("--output-format"); args.Add("stream-json");
+            // stream-json only emits intermediate events when --verbose is on;
+            // without it, only the final message is emitted (same as text).
+            args.Add("--verbose");
+        }
+        else
+        {
+            args.Add("--output-format"); args.Add("text");
+        }
         if (!string.IsNullOrEmpty(opts.AppendSystemPrompt))
         {
             args.Add("--append-system-prompt");

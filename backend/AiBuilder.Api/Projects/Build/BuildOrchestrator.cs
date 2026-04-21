@@ -114,8 +114,9 @@ public sealed class BuildOrchestrator
                 Cwd: workspacePath,
                 AppendSystemPrompt: systemPrompt,
                 DangerouslySkipPermissions: true,
-                Timeout: TimeSpan.FromMinutes(30)),
-            onStdout: stream.Write,
+                Timeout: TimeSpan.FromMinutes(30),
+                StreamJson: true),
+            onStdout: line => { foreach (var formatted in StreamJsonFormatter.Format(line)) stream.Write(formatted); },
             onStderr: line => stream.Write("[stderr] " + line),
             CancellationToken.None);
 

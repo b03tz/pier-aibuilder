@@ -68,12 +68,20 @@ NOT need to run them yourself, just produce code they can run):
 
 What you should NOT do:
 
+- **Do NOT launch any long-lived / dev-server process.** Specifically, do
+  NOT run `dotnet run`, `dotnet watch`, `npm run dev`, `npm start`, `vite`,
+  or anything else that stays running. AiBuilder starts the app in
+  production after deploy — you only need to produce source files. If you
+  want to sanity-check compilation, use `dotnet build` (it exits) or
+  `dotnet build -c Release`. Running a server here BLOCKS the build
+  forever; the process will be killed and the run marked failed.
 - Do not attempt to deploy to Pier. AiBuilder handles deploy.
 - Do not call Pier to set env vars. AiBuilder handles that.
 - Do not leave credentials or tokens in source. They come from env vars.
 - Do not touch anything outside the workspace.
 - Do not install system packages. Use `dotnet add package` and
-  `npm install` inside the workspace only.
+  `npm install` inside the workspace only. `npm install` is fine. Just
+  don't launch `npm run dev` afterwards.
 """;
 
     public static string BuildUserPrompt(Project project, IReadOnlyList<ConversationTurn> scopeTurns, bool isIteration)
@@ -100,7 +108,7 @@ What you should NOT do:
             }
             sb.AppendLine();
         }
-        sb.AppendLine("Plan the files you need, create/edit them, and run quick sanity checks (e.g. `dotnet build`) where it makes sense. When you're done, print a short summary of what you created or changed.");
+        sb.AppendLine("Plan the files, create/edit them. You MAY run `dotnet build` to verify compilation. Do NOT run `dotnet run`, `npm run dev`, or any command that starts a long-lived server — the build will hang and be killed. When you're done, print a short summary of what you created or changed.");
         return sb.ToString();
     }
 }
