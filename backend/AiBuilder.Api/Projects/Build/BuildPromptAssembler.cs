@@ -51,7 +51,38 @@ public static class BuildPromptAssembler
        It's a zip with `.csproj`, `PlexxerClient.cs`, and
        `Entities/*.cs`. Unzip into `backend/Generated/` and reference the
        .csproj from your backend (`<ProjectReference Include="..\Generated\...csproj" />`).
-    5. Full control-plane reference: https://plexxer.com/api-reference.md
+    5. **Grant your own token `rw` on every entity you created or
+       modified.** The generated app uses the same PLEXXER_API_TOKEN you
+       are using right now. If the token's grants don't cover the new
+       entity, runtime reads/writes will 403. Procedure:
+
+       a. GET https://api.plexxer.com/d/{{project.plexxerAppId}}/_meta/self
+          Read `token.tokenId`, `token.label`, `token.access` (the
+          per-entity grants, values like `["read","create","update","delete","aggregate"]`)
+          and `token.appGrants` (the `app:*` grants).
+       b. Build the new permissions dict. Translate each per-entity
+          grant's verb list back to `"r"` / `"w"` / `"rw"` (r = read
+          + aggregate only, w = create+update+delete, rw = all five).
+          Preserve every entry from the existing `access` and
+          `appGrants`; then add `"{EntityName}": "rw"` for each
+          entity you created or modified in this build.
+       c. PATCH the token:
+              PATCH https://api.plexxer.com/apps/{{project.plexxerAppId}}/tokens/{tokenId}
+          Body shape (the label is REQUIRED even when unchanged — the
+          API rejects patches without it):
+              {
+                "label": "<existing label from /_meta/self>",
+                "permissions": {
+                  "Message": "rw",
+                  "Admin":   "rw",
+                  "app:schemas": "rw",
+                  "app:tokens":  "rw",
+                  ...every other grant that was already present
+                }
+              }
+       d. Fetch `/_meta/self` again and confirm the new entity shows up
+          under `token.access`.
+    6. Full control-plane reference: https://plexxer.com/api-reference.md
 
   **AT RUNTIME (the app YOU build, not this subprocess)** — use the
   generated client to read/write records via the DATA PLANE:
