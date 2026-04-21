@@ -74,6 +74,30 @@ public sealed class EnvVarStore
         }
     }
 
+    // Create only if missing. Used by the post-build env-var seeder: we
+    // want to surface every var the app needs in the UI, but if the admin
+    // has already customised a value (e.g. rotated a secret) we must not
+    // clobber it on the next build.
+    public async Task<bool> EnsureAsync(string projectId, string key, string value, bool isSecret, bool exposeToFrontend, CancellationToken ct)
+    {
+        if (isSecret && exposeToFrontend)
+            throw new ArgumentException("A variable cannot be both secret and exposed to the frontend.");
+
+        var existing = await GetAsync(projectId, key, ct);
+        if (existing is not null) return false;
+
+        await _plexxer.CreateAsync(new TargetEnvVar
+        {
+            project          = new RelationRef<Project>(projectId),
+            key              = key,
+            value            = value,
+            isSecret         = isSecret,
+            exposeToFrontend = exposeToFrontend,
+            updatedAt        = DateTime.UtcNow,
+        }, ct);
+        return true;
+    }
+
     public async Task DeleteAsync(string projectId, string key, CancellationToken ct)
     {
         await _plexxer.DeleteAsync<TargetEnvVar>(new Dictionary<string, object?>

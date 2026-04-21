@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using AiBuilder.Api.Projects.Deploy;
 using AiBuilder.Api.Projects.Scope;
 using Plexxer.Client.AiBuilder;
 
@@ -15,6 +16,7 @@ public sealed class BuildOrchestrator
     private readonly WorkspaceManager _ws;
     private readonly BuildStreamHub _hub;
     private readonly ClaudeCli _cli;
+    private readonly EnvManifestSeeder _envSeeder;
     private readonly ILogger<BuildOrchestrator> _log;
 
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> ProjectLocks = new();
@@ -72,10 +74,11 @@ public sealed class BuildOrchestrator
     public BuildOrchestrator(
         ProjectStore projects, ConversationStore turns, BuildRunStore runs,
         WorkspaceManager ws, BuildStreamHub hub, ClaudeCli cli,
+        EnvManifestSeeder envSeeder,
         ILogger<BuildOrchestrator> log)
     {
         _projects = projects; _turns = turns; _runs = runs;
-        _ws = ws; _hub = hub; _cli = cli; _log = log;
+        _ws = ws; _hub = hub; _cli = cli; _envSeeder = envSeeder; _log = log;
     }
 
     public sealed record StartResult(string RunId, string Kind, string WorkspacePath);
@@ -213,6 +216,19 @@ public sealed class BuildOrchestrator
             // A commit failure is a soft warning — the build ran, files are on
             // disk, we just couldn't snapshot. Still mark the run succeeded.
             stream.Write($"[aibuilder] git commit warning: {e.Message}");
+        }
+
+        try
+        {
+            var seed = await _envSeeder.SeedAsync(project, workspacePath, CancellationToken.None);
+            stream.Write($"[aibuilder] env vars seeded: {seed.Implicit} implicit, {seed.Explicit} from manifest, {seed.Skipped} already present");
+            foreach (var w in seed.Warnings) stream.Write($"[aibuilder] env warning: {w}");
+        }
+        catch (Exception e)
+        {
+            // Env seed failures shouldn't flip the build. Admin can add them
+            // manually in the Deploy tab.
+            stream.Write($"[aibuilder] env seed warning: {e.Message}");
         }
 
         stream.Write("[aibuilder] build succeeded");

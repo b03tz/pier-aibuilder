@@ -36,6 +36,7 @@ builder.Services.AddSingleton<ClaudeCli>();
 builder.Services.AddSingleton<BuildRunStore>();
 builder.Services.AddSingleton<WorkspaceManager>();
 builder.Services.AddSingleton<BuildStreamHub>();
+builder.Services.AddSingleton<EnvManifestSeeder>();
 builder.Services.AddSingleton<BuildOrchestrator>();
 builder.Services.AddSingleton<EnvVarStore>();
 builder.Services.AddSingleton<DeployRunStore>();

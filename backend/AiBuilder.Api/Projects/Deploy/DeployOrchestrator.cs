@@ -170,6 +170,15 @@ public sealed class DeployOrchestrator
             notes.AppendLine(TrimForNotes(backendUpload.Body, 1500));
             if (backendUpload.Status >= 400)
                 return new Result("", "failed", null, null, $"backend deploy returned {backendUpload.Status}");
+            // Pier returns HTTP 200 with {"success":false, "message":"Health
+            // probe failed; rolled back to previous version."} when the
+            // uploaded build crashed at boot. Treat that as a failed deploy
+            // — the rollback version isn't what the admin asked for.
+            if (TryParseSuccess(backendUpload.Body) == false)
+            {
+                var msg = TryParseMessage(backendUpload.Body) ?? "Pier reported success=false with no message";
+                return new Result("", "failed", null, null, $"backend deploy rejected by Pier: {msg}");
+            }
             backendVersion = TryParseVersion(backendUpload.Body);
         }
 
@@ -183,6 +192,11 @@ public sealed class DeployOrchestrator
             notes.AppendLine(TrimForNotes(fe.Body, 1500));
             if (fe.Status >= 400)
                 return new Result("", "failed", backendVersion, null, $"frontend deploy returned {fe.Status}");
+            if (TryParseSuccess(fe.Body) == false)
+            {
+                var msg = TryParseMessage(fe.Body) ?? "Pier reported success=false with no message";
+                return new Result("", "failed", backendVersion, null, $"frontend deploy rejected by Pier: {msg}");
+            }
             frontendVersion = TryParseVersion(fe.Body);
         }
 
@@ -296,6 +310,34 @@ public sealed class DeployOrchestrator
             foreach (var key in new[] { "versionNumber", "version", "Version", "newVersion", "deployVersion" })
                 if (doc.RootElement.TryGetProperty(key, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.Number)
                     return v.GetDouble();
+        }
+        catch { /* best effort only */ }
+        return null;
+    }
+
+    private static bool? TryParseSuccess(string body)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("success", out var s))
+            {
+                if (s.ValueKind == System.Text.Json.JsonValueKind.True) return true;
+                if (s.ValueKind == System.Text.Json.JsonValueKind.False) return false;
+            }
+        }
+        catch { /* best effort only */ }
+        return null;
+    }
+
+    private static string? TryParseMessage(string body)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("message", out var m) &&
+                m.ValueKind == System.Text.Json.JsonValueKind.String)
+                return m.GetString();
         }
         catch { /* best effort only */ }
         return null;
