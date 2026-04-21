@@ -9,13 +9,18 @@ public static class ProjectStateMachine
         [WorkspaceStatus.Draft]          = new() { WorkspaceStatus.InConversation },
         [WorkspaceStatus.InConversation] = new() { WorkspaceStatus.ScopeLocked, WorkspaceStatus.InConversation },
         // ScopeLocked goes to Building on first build or Updating on iteration;
-        // caller decides based on build-run history.
-        [WorkspaceStatus.ScopeLocked]    = new() { WorkspaceStatus.Building, WorkspaceStatus.Updating },
+        // caller decides based on build-run history. Also allows an explicit
+        // Unlock back to InConversation if the admin wants to edit the scope
+        // before kicking off a build.
+        [WorkspaceStatus.ScopeLocked]    = new() { WorkspaceStatus.Building, WorkspaceStatus.Updating, WorkspaceStatus.InConversation },
         [WorkspaceStatus.Building]       = new() { WorkspaceStatus.DoneBuilding, WorkspaceStatus.ScopeLocked },
-        [WorkspaceStatus.DoneBuilding]   = new() { WorkspaceStatus.Deployed },
+        // DoneBuilding / DoneUpdating: Deploy is the happy path, but Unlock
+        // back to InConversation lets the admin add turns without deploying
+        // first (iterate on scope before going live).
+        [WorkspaceStatus.DoneBuilding]   = new() { WorkspaceStatus.Deployed, WorkspaceStatus.InConversation },
         [WorkspaceStatus.Deployed]       = new() { WorkspaceStatus.InConversation },
         [WorkspaceStatus.Updating]       = new() { WorkspaceStatus.DoneUpdating, WorkspaceStatus.ScopeLocked },
-        [WorkspaceStatus.DoneUpdating]   = new() { WorkspaceStatus.Deployed },
+        [WorkspaceStatus.DoneUpdating]   = new() { WorkspaceStatus.Deployed, WorkspaceStatus.InConversation },
     };
 
     public static bool CanTransition(string from, string to) =>

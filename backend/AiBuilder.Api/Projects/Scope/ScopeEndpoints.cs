@@ -102,6 +102,26 @@ public static class ScopeEndpoints
             await projects.SetStatusAsync(id, project.workspaceStatus, WorkspaceStatus.ScopeLocked, ct);
             return Results.Ok(new { id, workspaceStatus = WorkspaceStatus.ScopeLocked });
         });
+
+        group.MapPost("/unlock-scope", async (string id, ProjectStore projects, CancellationToken ct) =>
+        {
+            // Flip a locked-ish status back to InConversation so the admin
+            // can append more turns and then re-lock for another build.
+            // Workspace files are preserved — this is state-only.
+            var project = await projects.GetSafeAsync(id, ct);
+            if (project is null) return Results.NotFound();
+
+            var from = project.workspaceStatus;
+            if (from == WorkspaceStatus.InConversation || from == WorkspaceStatus.Draft)
+                return Results.Ok(new { id, workspaceStatus = from, noop = true });
+
+            if (!ProjectStateMachine.CanTransition(from, WorkspaceStatus.InConversation))
+                return Results.Conflict(new { error = "invalid-transition",
+                    from, to = WorkspaceStatus.InConversation });
+
+            await projects.SetStatusAsync(id, from, WorkspaceStatus.InConversation, ct);
+            return Results.Ok(new { id, workspaceStatus = WorkspaceStatus.InConversation });
+        });
     }
 
     private static TurnDto ToDto(ConversationTurn t) =>

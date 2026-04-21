@@ -23,9 +23,18 @@
         </v-btn>
       </div>
     </template>
-    <v-alert v-else type="info" variant="tonal" class="mb-5">
-      Scope is {{ project.workspaceStatus }}. Finish the current phase before adding more turns.
-    </v-alert>
+    <div v-else class="mb-5">
+      <v-alert type="info" variant="tonal" density="compact" class="mb-3">
+        Scope is <strong>{{ project.workspaceStatus }}</strong>.
+        <template v-if="canUnlock"> Unlock to add more turns.</template>
+      </v-alert>
+      <div v-if="canUnlock" class="d-flex">
+        <v-spacer />
+        <v-btn variant="outlined" color="warning" :loading="unlocking" @click="onUnlock">
+          Unlock scope
+        </v-btn>
+      </div>
+    </div>
 
     <!-- Transcript below, newest first so the turn you just sent appears
          right under the composer without scrolling. -->
@@ -51,12 +60,20 @@ const turns = ref<TurnDto[]>([])
 const draft = ref('')
 const sending = ref(false)
 const locking = ref(false)
+const unlocking = ref(false)
 
 const canTalk = computed(() =>
   ['Draft', 'InConversation', 'Deployed'].includes(props.project.workspaceStatus),
 )
 const canLock = computed(() =>
   props.project.workspaceStatus === 'InConversation' && turns.value.length > 0,
+)
+// Unlock is only useful from a "closed" but non-live state. Building and
+// Updating are in-flight — admin should cancel those, not unlock them.
+// Deployed auto-flips to InConversation when you send a turn, so the
+// explicit button there would be redundant.
+const canUnlock = computed(() =>
+  ['ScopeLocked', 'DoneBuilding', 'DoneUpdating'].includes(props.project.workspaceStatus),
 )
 const reversedTurns = computed(() => [...turns.value].sort((a, b) => b.turnIndex - a.turnIndex))
 
@@ -87,6 +104,16 @@ async function onLock() {
     emit('changed')
   } finally {
     locking.value = false
+  }
+}
+
+async function onUnlock() {
+  unlocking.value = true
+  try {
+    await api.post(`/api/projects/${props.project.id}/unlock-scope`)
+    emit('changed')
+  } finally {
+    unlocking.value = false
   }
 }
 </script>
