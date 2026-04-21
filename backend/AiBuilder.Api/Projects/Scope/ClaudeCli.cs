@@ -20,6 +20,24 @@ public sealed class ClaudeCli
 
     public async Task<RunResult> RunAsync(RunOptions opts, CancellationToken ct)
     {
+        var stdout = new StringBuilder();
+        var stderr = new StringBuilder();
+        var exitCode = await RunStreamingAsync(opts,
+            onStdout: line => stdout.AppendLine(line),
+            onStderr: line => stderr.AppendLine(line),
+            ct);
+        return new RunResult(exitCode, stdout.ToString(), stderr.ToString());
+    }
+
+    // Streaming variant: every stdout / stderr line fires the corresponding
+    // callback as soon as it arrives. Used by the build orchestrator to push
+    // SSE events and append to an on-disk transcript in real time.
+    public async Task<int> RunStreamingAsync(
+        RunOptions opts,
+        Action<string> onStdout,
+        Action<string> onStderr,
+        CancellationToken ct)
+    {
         var exe = Environment.GetEnvironmentVariable("CLAUDE_CLI_PATH") ?? "claude";
         var args = new List<string> { "-p", opts.Prompt, "--output-format", "text" };
         if (!string.IsNullOrEmpty(opts.AppendSystemPrompt))
@@ -58,10 +76,8 @@ public sealed class ClaudeCli
         CopyIfSet(psi, "TERM");
 
         using var p = new Process { StartInfo = psi };
-        var stdout = new StringBuilder();
-        var stderr = new StringBuilder();
-        p.OutputDataReceived += (_, e) => { if (e.Data is not null) stdout.AppendLine(e.Data); };
-        p.ErrorDataReceived  += (_, e) => { if (e.Data is not null) stderr.AppendLine(e.Data); };
+        p.OutputDataReceived += (_, e) => { if (e.Data is not null) onStdout(e.Data); };
+        p.ErrorDataReceived  += (_, e) => { if (e.Data is not null) onStderr(e.Data); };
 
         p.Start();
         p.BeginOutputReadLine();
@@ -80,7 +96,7 @@ public sealed class ClaudeCli
             try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { /* ignore */ }
             throw;
         }
-        return new RunResult(p.ExitCode, stdout.ToString(), stderr.ToString());
+        return p.ExitCode;
     }
 
     private static void CopyIfSet(ProcessStartInfo psi, string key)

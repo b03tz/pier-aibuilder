@@ -2,6 +2,8 @@ using AiBuilder.Api.Auth;
 using AiBuilder.Api.Config;
 using AiBuilder.Api.Infrastructure;
 using AiBuilder.Api.Projects;
+using AiBuilder.Api.Projects.Build;
+using AiBuilder.Api.Projects.Deploy;
 using AiBuilder.Api.Projects.Scope;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
@@ -31,6 +33,14 @@ builder.Services.AddSingleton<ProjectStore>();
 builder.Services.AddSingleton<TokenVerifier>();
 builder.Services.AddSingleton<ConversationStore>();
 builder.Services.AddSingleton<ClaudeCli>();
+builder.Services.AddSingleton<BuildRunStore>();
+builder.Services.AddSingleton<WorkspaceManager>();
+builder.Services.AddSingleton<BuildStreamHub>();
+builder.Services.AddSingleton<BuildOrchestrator>();
+builder.Services.AddSingleton<EnvVarStore>();
+builder.Services.AddSingleton<DeployRunStore>();
+builder.Services.AddSingleton<PublishRunner>();
+builder.Services.AddSingleton<DeployOrchestrator>();
 builder.Services.AddHttpClient();
 
 builder.Services.AddAuthentication(AuthEndpoints.CookieScheme)
@@ -82,6 +92,9 @@ app.MapAuth();
 app.MapDebug();
 app.MapProjects();
 app.MapScope();
+app.MapBuilds();
+app.MapWorkspace();
+app.MapDeploy();
 
 // Static frontend (Vue/Vite build output). Served at the app root.
 var frontendDist = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "frontend", "dist"));

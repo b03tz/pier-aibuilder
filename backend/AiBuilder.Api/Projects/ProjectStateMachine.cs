@@ -8,7 +8,9 @@ public static class ProjectStateMachine
     {
         [WorkspaceStatus.Draft]          = new() { WorkspaceStatus.InConversation },
         [WorkspaceStatus.InConversation] = new() { WorkspaceStatus.ScopeLocked, WorkspaceStatus.InConversation },
-        [WorkspaceStatus.ScopeLocked]    = new() { WorkspaceStatus.Building },
+        // ScopeLocked goes to Building on first build or Updating on iteration;
+        // caller decides based on build-run history.
+        [WorkspaceStatus.ScopeLocked]    = new() { WorkspaceStatus.Building, WorkspaceStatus.Updating },
         [WorkspaceStatus.Building]       = new() { WorkspaceStatus.DoneBuilding, WorkspaceStatus.ScopeLocked },
         [WorkspaceStatus.DoneBuilding]   = new() { WorkspaceStatus.Deployed },
         [WorkspaceStatus.Deployed]       = new() { WorkspaceStatus.InConversation },
