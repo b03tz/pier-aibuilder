@@ -1,0 +1,38 @@
+# Build artifacts
+bin/
+obj/
+publish/
+*.dll
+*.pdb
+
+# Node / Vite
+node_modules/
+dist/
+.vite/
+
+# Secrets & env
+.env
+.env.local
+*.env
+appsettings.Development.json
+appsettings.Local.json
+
+# IDE / editor
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# AiBuilder runtime (should never land in this repo)
+app_data/
+projects/

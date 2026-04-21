@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Plexxer.Client.AiBuilder</RootNamespace>
+    <AssemblyName>Plexxer.Client.AiBuilder</AssemblyName>
+  </PropertyGroup>
+</Project>
