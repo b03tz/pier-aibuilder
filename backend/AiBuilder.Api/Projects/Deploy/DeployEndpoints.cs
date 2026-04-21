@@ -47,7 +47,7 @@ public static class DeployEndpoints
 
         // --- Deploy runs ---
 
-        group.MapPost("/deploy", async (string id, DeployOrchestrator orch, CancellationToken ct) =>
+        group.MapPost("/deploy", async (string id, DeployOrchestrator orch, ILogger<DeployOrchestrator> log, CancellationToken ct) =>
         {
             try
             {
@@ -61,6 +61,20 @@ public static class DeployEndpoints
                 return Results.Conflict(new { error = "invalid-transition", from = e.From, to = e.To });
             }
             catch (InvalidOperationException e) { return Results.Conflict(new { error = e.Message }); }
+            catch (Exception e)
+            {
+                // Orchestrator crashed mid-flight (e.g. npm missing, Pier
+                // returned an error the orchestrator didn't expect). The
+                // DeployRun itself was already marked failed inside the
+                // orchestrator's own try/catch; we surface a structured
+                // 502 here so the UI shows a real error instead of a
+                // generic 500 stack dump.
+                log.LogError(e, "deploy crashed for project {ProjectId}", id);
+                return Results.Json(
+                    new { error = "deploy-crashed", message = e.Message,
+                          hint = "Check the most recent DeployRun's notes for details." },
+                    statusCode: 502);
+            }
         });
 
         group.MapGet("/deploys", async (string id, DeployRunStore runs, CancellationToken ct) =>

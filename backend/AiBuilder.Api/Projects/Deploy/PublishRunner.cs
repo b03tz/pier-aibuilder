@@ -13,19 +13,31 @@ public sealed class PublishRunner
 
     public async Task<RunOutput> RunAsync(string exe, string[] args, string cwd, CancellationToken ct)
     {
+        // The systemd service for pier-aibuilder runs with a minimal PATH
+        // (~/usr/bin:/bin). Tools like npm may live under fnm/nvm/volta,
+        // whose entries only get added by the user's login profile (.bashrc
+        // via /etc/profile etc.). Running through a login shell picks those
+        // up so `npm` (and `dotnet`, if it's in /opt) resolve correctly.
+        //
+        // `exec "$0" "$@"` replaces the shell with the target process so we
+        // don't leave a stray bash hanging around; `$@` preserves each
+        // argument exactly, no escaping needed on our side.
         var psi = new ProcessStartInfo
         {
-            FileName = exe,
+            FileName = "/bin/bash",
             WorkingDirectory = cwd,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
         };
+        psi.ArgumentList.Add("-lc");
+        psi.ArgumentList.Add("exec \"$0\" \"$@\"");
+        psi.ArgumentList.Add(exe);
         foreach (var a in args) psi.ArgumentList.Add(a);
 
         psi.Environment.Clear();
-        foreach (var key in new[] { "PATH", "HOME", "LANG", "LC_ALL", "TERM" })
+        foreach (var key in new[] { "PATH", "HOME", "LANG", "LC_ALL", "TERM", "USER", "LOGNAME" })
         {
             var v = Environment.GetEnvironmentVariable(key);
             if (v is not null) psi.Environment[key] = v;

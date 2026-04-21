@@ -43,6 +43,9 @@
     <v-alert v-if="!canDeploy" type="info" variant="tonal" density="compact" class="mb-3">
       Deploy is available after a successful build (DoneBuilding or DoneUpdating).
     </v-alert>
+    <v-alert v-if="deployError" type="error" class="mb-3" closable @click:close="deployError = null">
+      {{ deployError }} — see the latest deploy run's notes below for the full trace.
+    </v-alert>
 
     <h4 class="text-subtitle-1 mt-5 mb-2">Deploy history</h4>
     <v-table density="compact" v-if="deploys.length">
@@ -150,12 +153,26 @@ async function removeKey(key: string) {
   await reload()
 }
 
+const deployError = ref<string | null>(null)
+
 async function onDeploy() {
   deploying.value = true
+  deployError.value = null
   try {
     await api.post(`/api/projects/${props.project.id}/deploy`)
     await reload()
     emit('changed')
+  } catch (e: any) {
+    // Always refresh so the failed DeployRun shows up in history even
+    // though the request itself errored.
+    await reload().catch(() => {})
+    emit('changed')
+    const body = e?.body
+    if (body && typeof body === 'object') {
+      deployError.value = body.message ?? body.error ?? e.message ?? 'Deploy failed'
+    } else {
+      deployError.value = e?.message ?? 'Deploy failed'
+    }
   } finally {
     deploying.value = false
   }
