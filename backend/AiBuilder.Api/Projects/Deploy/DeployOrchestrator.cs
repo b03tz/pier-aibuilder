@@ -92,7 +92,12 @@ public sealed class DeployOrchestrator
         notes.AppendLine("[step] dotnet publish");
         var publishOut = Path.Combine(workspace, ".aibuilder", "publish");
         if (Directory.Exists(publishOut)) Directory.Delete(publishOut, recursive: true);
-        var pub = await _publish.DotnetPublishAsync(FindBackendProject(backendDir), publishOut, ct);
+        // Run `dotnet publish` with cwd = backend/. Dotnet auto-discovers the
+        // csproj/sln in cwd. If the workspace has a more complex layout the
+        // generated app is responsible for structuring it so this call finds
+        // the right project — the system prompt mandates `backend/` at the
+        // workspace root.
+        var pub = await _publish.DotnetPublishAsync(backendDir, publishOut, ct);
         notes.AppendLine(TrimForNotes(pub.Stdout, 2000));
         if (pub.ExitCode != 0)
         {
@@ -204,26 +209,12 @@ public sealed class DeployOrchestrator
         return new Result("", "succeeded", backendVersion, frontendVersion, notes.ToString());
     }
 
-    // Backend project usually lives at backend/<Project>.csproj with one csproj
-    // at that level. If the build produced a solution, prefer `dotnet publish
-    // <solution>` which picks the first exe project.
-    private static string FindBackendProject(string backendDir)
-    {
-        var sln = Directory.GetFiles(backendDir, "*.sln").FirstOrDefault();
-        if (sln is not null) return sln;
-        var csproj = Directory.GetFiles(backendDir, "*.csproj").FirstOrDefault();
-        if (csproj is not null) return csproj;
-        // Nested: pick the first csproj we find anywhere under backend/.
-        var nested = Directory.GetFiles(backendDir, "*.csproj", SearchOption.AllDirectories).FirstOrDefault();
-        return nested ?? backendDir;
-    }
-
     private static double? TryParseVersion(string body)
     {
         try
         {
             using var doc = System.Text.Json.JsonDocument.Parse(body);
-            foreach (var key in new[] { "version", "Version", "newVersion", "deployVersion" })
+            foreach (var key in new[] { "versionNumber", "version", "Version", "newVersion", "deployVersion" })
                 if (doc.RootElement.TryGetProperty(key, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.Number)
                     return v.GetDouble();
         }
