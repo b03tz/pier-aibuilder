@@ -1,0 +1,130 @@
+using System.Text.RegularExpressions;
+using Plexxer.Client.AiBuilder;
+
+namespace AiBuilder.Api.Projects;
+
+public static class ProjectsEndpoints
+{
+    // Must match Pier's subdomain regex. Rejects path traversal, uppercase,
+    // leading dash. Same regex is used before any path interpolation on disk.
+    public static readonly Regex PierAppNameRegex = new("^[a-z][a-z0-9-]{0,39}$", RegexOptions.Compiled);
+
+    public sealed record CreateRequest(
+        string Name,
+        string PierAppName,
+        string PierApiToken,
+        string PlexxerAppId,
+        string PlexxerApiToken,
+        string ScopeBrief);
+
+    public sealed record UpdateRequest(
+        string? Name,
+        string? PierApiToken,
+        string? PlexxerApiToken,
+        string? ScopeBrief);
+
+    public static void MapProjects(this IEndpointRouteBuilder app)
+    {
+        var group = app.MapGroup("/api/projects").RequireAuthorization().WithTags("projects");
+
+        group.MapPost("", async (CreateRequest req, ProjectStore store, TokenVerifier verifier, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.Name))
+                return Results.BadRequest(new { error = "name-required" });
+            if (!PierAppNameRegex.IsMatch(req.PierAppName))
+                return Results.BadRequest(new { error = "pier-app-name-invalid",
+                    message = "Must match ^[a-z][a-z0-9-]{0,39}$" });
+            if (string.IsNullOrWhiteSpace(req.PierApiToken) ||
+                string.IsNullOrWhiteSpace(req.PlexxerAppId) ||
+                string.IsNullOrWhiteSpace(req.PlexxerApiToken) ||
+                string.IsNullOrWhiteSpace(req.ScopeBrief))
+                return Results.BadRequest(new { error = "required-fields-missing" });
+
+            if (await store.PierAppNameExistsAsync(req.PierAppName, ct))
+                return Results.Conflict(new { error = "pier-app-name-already-in-use" });
+
+            // Inline token verification — fail loudly now rather than at deploy.
+            var pier = await verifier.VerifyPierAsync(req.PierAppName, req.PierApiToken, ct);
+            if (!pier.Ok)
+                return Results.BadRequest(new { error = "pier-token-rejected", message = pier.Message });
+            var plex = await verifier.VerifyPlexxerAsync(req.PlexxerAppId, req.PlexxerApiToken, ct);
+            if (!plex.Ok)
+                return Results.BadRequest(new { error = "plexxer-token-rejected", message = plex.Message });
+
+            var now = DateTime.UtcNow;
+            var created = await store.CreateAsync(new Project
+            {
+                name            = req.Name.Trim(),
+                pierAppName     = req.PierAppName.Trim(),
+                pierApiToken    = req.PierApiToken,
+                plexxerAppId    = req.PlexxerAppId.Trim(),
+                plexxerApiToken = req.PlexxerApiToken,
+                scopeBrief      = req.ScopeBrief,
+                workspaceStatus = WorkspaceStatus.Draft,
+                createdAt       = now,
+                updatedAt       = now,
+            }, ct);
+            return Results.Created($"/api/projects/{created.Id}", ToDto(created));
+        });
+
+        group.MapGet("", async (ProjectStore store, CancellationToken ct) =>
+        {
+            var all = await store.ListSafeAsync(ct);
+            return Results.Ok(all.Select(ToDto));
+        });
+
+        group.MapGet("/{id}", async (string id, ProjectStore store, CancellationToken ct) =>
+        {
+            var p = await store.GetSafeAsync(id, ct);
+            return p is null ? Results.NotFound() : Results.Ok(ToDto(p));
+        });
+
+        group.MapPatch("/{id}", async (string id, UpdateRequest req, ProjectStore store, TokenVerifier verifier, CancellationToken ct) =>
+        {
+            var existing = await store.GetWithSecretsAsync(id, ct);
+            if (existing is null) return Results.NotFound();
+
+            var patch = new Dictionary<string, object?>();
+            if (!string.IsNullOrWhiteSpace(req.Name)) patch["name"] = req.Name.Trim();
+            if (req.ScopeBrief is not null)           patch["scopeBrief"] = req.ScopeBrief;
+
+            if (!string.IsNullOrWhiteSpace(req.PierApiToken))
+            {
+                var pier = await verifier.VerifyPierAsync(existing.pierAppName, req.PierApiToken, ct);
+                if (!pier.Ok) return Results.BadRequest(new { error = "pier-token-rejected", message = pier.Message });
+                patch["pierApiToken"] = req.PierApiToken;
+            }
+            if (!string.IsNullOrWhiteSpace(req.PlexxerApiToken))
+            {
+                var plex = await verifier.VerifyPlexxerAsync(existing.plexxerAppId, req.PlexxerApiToken, ct);
+                if (!plex.Ok) return Results.BadRequest(new { error = "plexxer-token-rejected", message = plex.Message });
+                patch["plexxerApiToken"] = req.PlexxerApiToken;
+            }
+
+            if (patch.Count == 0) return Results.Ok(ToDto(await SafeAfterPatchAsync(store, id, ct) ?? existing));
+
+            await store.UpdateFieldsAsync(id, patch, ct);
+            var after = await store.GetSafeAsync(id, ct);
+            return Results.Ok(ToDto(after ?? existing));
+        });
+    }
+
+    private static async Task<Project?> SafeAfterPatchAsync(ProjectStore store, string id, CancellationToken ct) =>
+        await store.GetSafeAsync(id, ct);
+
+    // Safe DTO — never includes *ApiToken. Stamped with the fields we actually
+    // want the browser to see.
+    public sealed record ProjectDto(
+        string Id,
+        string Name,
+        string PierAppName,
+        string PlexxerAppId,
+        string ScopeBrief,
+        string WorkspaceStatus,
+        DateTime CreatedAt,
+        DateTime UpdatedAt);
+
+    public static ProjectDto ToDto(Project p) => new(
+        p.Id!, p.name, p.pierAppName, p.plexxerAppId, p.scopeBrief,
+        p.workspaceStatus, p.createdAt, p.updatedAt);
+}

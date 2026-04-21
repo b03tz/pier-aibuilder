@@ -1,6 +1,8 @@
 using AiBuilder.Api.Auth;
 using AiBuilder.Api.Config;
 using AiBuilder.Api.Infrastructure;
+using AiBuilder.Api.Projects;
+using AiBuilder.Api.Projects.Scope;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http.Json;
@@ -25,6 +27,10 @@ builder.Services.AddDataProtection()
 // owns its HttpClient with a pinned baseUrl and will be reused across requests.
 builder.Services.AddSingleton(_ => new PlexxerClient(env.PlexxerApiToken, env.PlexxerAppId));
 builder.Services.AddSingleton<AdminStore>();
+builder.Services.AddSingleton<ProjectStore>();
+builder.Services.AddSingleton<TokenVerifier>();
+builder.Services.AddSingleton<ConversationStore>();
+builder.Services.AddSingleton<ClaudeCli>();
 builder.Services.AddHttpClient();
 
 builder.Services.AddAuthentication(AuthEndpoints.CookieScheme)
@@ -74,6 +80,8 @@ app.MapHealth();
 app.MapPublicEnv();
 app.MapAuth();
 app.MapDebug();
+app.MapProjects();
+app.MapScope();
 
 // Static frontend (Vue/Vite build output). Served at the app root.
 var frontendDist = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "frontend", "dist"));
