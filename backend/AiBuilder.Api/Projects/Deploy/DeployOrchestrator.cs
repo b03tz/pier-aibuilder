@@ -145,7 +145,7 @@ public sealed class DeployOrchestrator
         var limiter = new PierRateLimiter();
 
         // 3. Push env vars
-        var envVars = await _envs.ListForProjectAsync(project.Id!, includeSecretValues: true, ct);
+        var envVars = await _envs.ListForProjectAsync(project.Id!, ct);
         notes.AppendLine($"[step] sync {envVars.Count} env var(s) to Pier");
         foreach (var v in envVars)
         {

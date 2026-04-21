@@ -12,20 +12,20 @@ public sealed class EnvVarStore
     private readonly PlexxerClient _plexxer;
     public EnvVarStore(PlexxerClient plexxer) => _plexxer = plexxer;
 
-    public async Task<List<TargetEnvVar>> ListForProjectAsync(string projectId, bool includeSecretValues, CancellationToken ct)
-    {
-        var query = new Dictionary<string, object?>
-        {
-            ["sort"]  = new Dictionary<string, object?> { ["key"] = 1 },
-            ["limit"] = 500,
-        };
-        if (!includeSecretValues) query["excludeFields"] = new[] { "value" };
-        return await _plexxer.ReadAsync<TargetEnvVar>(new Dictionary<string, object?>
+    // Always returns the full record including the `value` field. Callers
+    // that expose results to the browser (GET /env) must nullify values
+    // for isSecret entries at the DTO boundary — don't strip here, because
+    // that would also hide non-secret values which the UI should display.
+    public async Task<List<TargetEnvVar>> ListForProjectAsync(string projectId, CancellationToken ct) =>
+        await _plexxer.ReadAsync<TargetEnvVar>(new Dictionary<string, object?>
         {
             ["project:eq"] = projectId,
-            ["query"] = query,
+            ["query"] = new Dictionary<string, object?>
+            {
+                ["sort"]  = new Dictionary<string, object?> { ["key"] = 1 },
+                ["limit"] = 500,
+            },
         }, ct);
-    }
 
     public async Task<TargetEnvVar?> GetAsync(string projectId, string key, CancellationToken ct)
     {

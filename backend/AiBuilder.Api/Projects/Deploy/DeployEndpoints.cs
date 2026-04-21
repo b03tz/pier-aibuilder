@@ -19,7 +19,9 @@ public static class DeployEndpoints
 
         group.MapGet("/env", async (string id, EnvVarStore envs, CancellationToken ct) =>
         {
-            var list = await envs.ListForProjectAsync(id, includeSecretValues: false, ct);
+            // Store returns full records; this is where we decide what to
+            // expose to the browser: secrets → null, non-secrets → real value.
+            var list = await envs.ListForProjectAsync(id, ct);
             return Results.Ok(list.Select(v => new EnvVarDto(
                 v.key,
                 v.isSecret ? null : v.value,
