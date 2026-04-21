@@ -186,39 +186,52 @@ public sealed class DeployOrchestrator
             frontendVersion = TryParseVersion(fe.Body);
         }
 
-        // 6. Restart
-        await limiter.WaitAsync(ct);
-        using (var rr = await pier.RestartAsync(ct))
+        // 6. Restart — BACKEND ONLY. /restart on Pier targets the backend
+        // systemd service. Frontend-only apps have no systemd unit, so
+        // calling it returns 500. Nginx picks up the new static files
+        // atomically on /frontend/deploy, so no restart is needed there.
+        if (backendZip is not null)
         {
+            await limiter.WaitAsync(ct);
+            using var rr = await pier.RestartAsync(ct);
             notes.AppendLine($"[step] POST /restart -> {(int)rr.StatusCode}");
             if (!rr.IsSuccessStatusCode)
                 return new Result("", "failed", backendVersion, frontendVersion, $"restart returned {(int)rr.StatusCode}");
-        }
 
-        // 7. Poll for Running (max ~45s)
-        for (int attempt = 0; attempt < 15; attempt++)
-        {
-            await Task.Delay(3000, ct);
-            await limiter.WaitAsync(ct);
-            var state = await pier.GetStateAsync(ct);
-            if (state?.Status == "Running")
+            // 7. Poll for Running (also backend-only — a frontend-only app
+            // stays in desiredState=Down per Pier, which is correct).
+            for (int attempt = 0; attempt < 15; attempt++)
             {
-                notes.AppendLine("[step] app is Running");
-                break;
+                await Task.Delay(3000, ct);
+                await limiter.WaitAsync(ct);
+                var state = await pier.GetStateAsync(ct);
+                if (state?.Status == "Running")
+                {
+                    notes.AppendLine("[step] app is Running");
+                    break;
+                }
+                if (attempt == 14)
+                    notes.AppendLine("[step] app did not reach Running in 45s — check logs");
             }
-            if (attempt == 14)
-                notes.AppendLine("[step] app did not reach Running in 45s — check logs");
+        }
+        else
+        {
+            notes.AppendLine("[step] no backend → skipping /restart and Running poll (frontend is served directly by nginx)");
         }
 
-        // 8. Log tail (best effort)
-        try
+        // 8. Log tail (best effort, backend-only — Pier's /logs is the backend
+        // systemd journal, which doesn't exist for a frontend-only app).
+        if (backendZip is not null)
         {
-            await limiter.WaitAsync(ct);
-            var tail = await pier.GetLogsAsync(200, ct);
-            notes.AppendLine("[step] /logs?lines=200:");
-            notes.AppendLine(TrimForNotes(tail, 3000));
+            try
+            {
+                await limiter.WaitAsync(ct);
+                var tail = await pier.GetLogsAsync(200, ct);
+                notes.AppendLine("[step] /logs?lines=200:");
+                notes.AppendLine(TrimForNotes(tail, 3000));
+            }
+            catch (Exception e) { notes.AppendLine($"[step] log tail failed: {e.Message}"); }
         }
-        catch (Exception e) { notes.AppendLine($"[step] log tail failed: {e.Message}"); }
 
         return new Result("", "succeeded", backendVersion, frontendVersion, notes.ToString());
     }
