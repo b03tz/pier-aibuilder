@@ -21,10 +21,10 @@ public sealed class Project
     public string pierApiToken { get; set; }
 
     [JsonPropertyName("plexxerAppId")]
-    public string plexxerAppId { get; set; }
+    public string? plexxerAppId { get; set; }
 
     [JsonPropertyName("plexxerApiToken")]
-    public string plexxerApiToken { get; set; }
+    public string? plexxerApiToken { get; set; }
 
     [JsonPropertyName("scopeBrief")]
     public string scopeBrief { get; set; }

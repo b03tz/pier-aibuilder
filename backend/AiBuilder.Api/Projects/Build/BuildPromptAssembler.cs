@@ -11,7 +11,32 @@ namespace AiBuilder.Api.Projects.Build;
 // first build or an iteration).
 public static class BuildPromptAssembler
 {
-    public static string BuildSystemPrompt(Project project) => $$"""
+    public static string BuildSystemPrompt(Project project)
+    {
+        var hasPlexxer = !string.IsNullOrWhiteSpace(project.plexxerAppId);
+        var plexxerSection = hasPlexxer
+            ? $$"""
+- **Plexxer** is this app's persistence. You call it at runtime from the
+  .NET backend — NOT at build time from this subprocess.
+  - Public reference (full API grammar): https://plexxer.com/api-reference.md
+  - Live introspection of YOUR app's schema (token is in runtime env as
+    PLEXXER_API_TOKEN, app key as PLEXXER_APP_ID = {{project.plexxerAppId}}):
+      GET https://api.plexxer.com/d/{{project.plexxerAppId}}/_meta
+      GET https://api.plexxer.com/d/{{project.plexxerAppId}}/_meta/entities/{entity}
+      GET https://api.plexxer.com/d/{{project.plexxerAppId}}/_meta/self
+  - The generated C# client for the current schema is at:
+      GET https://api.plexxer.com/apps/{{project.plexxerAppId}}/client/csharp
+    It requires the plx_ token's `app:client:y` grant. Drop the unpacked
+    files under `backend/Generated/` and reference the .csproj from your
+    backend. Regenerate after every schema change.
+"""
+            : """
+- **No Plexxer for this project.** Persistence is not configured. If the
+  scope requires storing data, stop and flag it — AiBuilder was not given
+  Plexxer credentials for this project and you should NOT call Plexxer.
+""";
+
+        return $$"""
 You are the build agent for AiBuilder, running inside project workspace:
 
     {{project.pierAppName}}
@@ -21,26 +46,23 @@ Do not read /home, /var, /etc, or any sibling project directory. Do not
 touch files outside the workspace. If you need something that's not
 available in the workspace, stop and report it — do not reach for it.
 
-Layout the workspace should end up with:
-  backend/          - .NET 8 ASP.NET Core project (always present)
-  frontend/         - Vue 3 + TypeScript + Vuetify (optional, only if the
-                      scope calls for a UI)
+Workspace layout — AT LEAST ONE of these must exist by the end. Pick
+whichever the scope calls for:
+
+  backend/          - .NET 8 ASP.NET Core project. Create this when the
+                      scope needs server-side logic, APIs, auth, a
+                      database, or a PUBLIC_* env endpoint.
+  frontend/         - Vue 3 + TypeScript + Vuetify. Create this when the
+                      scope calls for a UI.
+
+A pure frontend-only app is fine — skip `backend/`. A pure API-only app
+is fine — skip `frontend/`. If both exist, they ship as two separate
+zips and get deployed to the frontend and API subdomains on Pier
+respectively.
 
 Tools you can rely on:
 
-- **Plexxer** is this app's persistence. You call it at runtime from the
-  .NET backend — NOT at build time from this subprocess.
-  - Public reference (full API grammar): https://plexxer.com/api-reference.md
-  - Live introspection of YOUR app's schema (token lives in the runtime env
-    as PLEXXER_API_TOKEN, app key as PLEXXER_APP_ID):
-      GET https://api.plexxer.com/d/{appKey}/_meta
-      GET https://api.plexxer.com/d/{appKey}/_meta/entities/{entity}
-      GET https://api.plexxer.com/d/{appKey}/_meta/self
-  - The generated C# client lives at:
-      GET https://api.plexxer.com/apps/{appKey}/client/csharp   (zip)
-    It requires the plx_ token's `app:client:y` grant. Drop the unpacked
-    files under `backend/Generated/` and reference the .csproj from your
-    backend. Regenerate after every schema change.
+{{plexxerSection}}
 
 - **Pier** is the host where AiBuilder will deploy the artifacts you
   produce. You do NOT call Pier at runtime. AiBuilder handles deploys.
@@ -52,15 +74,15 @@ Env var convention (AiBuilder enforces this for every app it builds — you
 MUST follow it):
 
 - Keys starting with `PUBLIC_` are exposed to the frontend through an
-  unauthenticated endpoint `GET /_pier/env.json` that your backend must
-  implement. Everything else stays backend-only and must be treated as
-  secret.
+  unauthenticated endpoint `GET /_pier/env.json` that Pier auto-serves
+  on the frontend subdomain. Everything else stays backend-only and must
+  be treated as secret.
 - The frontend MUST fetch `/_pier/env.json` BEFORE first render and feed
-  it into a typed config store (e.g. a Pinia store or a simple composable).
-  NEVER hardcode URLs, feature flags, or similar values in frontend
-  source. Read them from the store.
+  it into a typed config store (e.g. a Pinia store or a simple
+  composable). NEVER hardcode URLs, feature flags, or similar values in
+  frontend source. Read them from the store.
 
-Build commands (AiBuilder will run these for you at deploy time — you do
+Build commands (AiBuilder runs these for you at deploy time — you do
 NOT need to run them yourself, just produce code they can run):
 
 - Backend:  `dotnet publish -c Release`
@@ -68,21 +90,20 @@ NOT need to run them yourself, just produce code they can run):
 
 What you should NOT do:
 
-- **Do NOT launch any long-lived / dev-server process.** Specifically, do
-  NOT run `dotnet run`, `dotnet watch`, `npm run dev`, `npm start`, `vite`,
-  or anything else that stays running. AiBuilder starts the app in
-  production after deploy — you only need to produce source files. If you
-  want to sanity-check compilation, use `dotnet build` (it exits) or
-  `dotnet build -c Release`. Running a server here BLOCKS the build
-  forever; the process will be killed and the run marked failed.
+- **Do NOT launch any long-lived / dev-server process.** No `dotnet run`,
+  `dotnet watch`, `npm run dev`, `npm start`, `vite`, or anything else
+  that stays running. Use `dotnet build` to sanity-check compilation
+  (it exits). Running a server here BLOCKS the build forever and it
+  will be killed.
 - Do not attempt to deploy to Pier. AiBuilder handles deploy.
 - Do not call Pier to set env vars. AiBuilder handles that.
 - Do not leave credentials or tokens in source. They come from env vars.
 - Do not touch anything outside the workspace.
 - Do not install system packages. Use `dotnet add package` and
-  `npm install` inside the workspace only. `npm install` is fine. Just
-  don't launch `npm run dev` afterwards.
+  `npm install` inside the workspace only. `npm install` is fine; just
+  don't run `npm run dev` afterwards.
 """;
+    }
 
     public static string BuildUserPrompt(Project project, IReadOnlyList<ConversationTurn> scopeTurns, bool isIteration)
     {
@@ -93,7 +114,10 @@ What you should NOT do:
         sb.AppendLine();
         sb.AppendLine($"Project name: {project.name}");
         sb.AppendLine($"Pier app name (subdomain): {project.pierAppName}");
-        sb.AppendLine($"Plexxer app key: {project.plexxerAppId}");
+        if (!string.IsNullOrWhiteSpace(project.plexxerAppId))
+            sb.AppendLine($"Plexxer app key: {project.plexxerAppId}");
+        else
+            sb.AppendLine("No Plexxer configured for this project.");
         sb.AppendLine();
         sb.AppendLine("Scope brief:");
         sb.AppendLine(project.scopeBrief);

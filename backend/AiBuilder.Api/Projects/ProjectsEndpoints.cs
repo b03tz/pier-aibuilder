@@ -13,13 +13,14 @@ public static class ProjectsEndpoints
         string Name,
         string PierAppName,
         string PierApiToken,
-        string PlexxerAppId,
-        string PlexxerApiToken,
+        string? PlexxerAppId,
+        string? PlexxerApiToken,
         string ScopeBrief);
 
     public sealed record UpdateRequest(
         string? Name,
         string? PierApiToken,
+        string? PlexxerAppId,
         string? PlexxerApiToken,
         string? ScopeBrief);
 
@@ -34,11 +35,16 @@ public static class ProjectsEndpoints
             if (!PierAppNameRegex.IsMatch(req.PierAppName))
                 return Results.BadRequest(new { error = "pier-app-name-invalid",
                     message = "Must match ^[a-z][a-z0-9-]{0,39}$" });
-            if (string.IsNullOrWhiteSpace(req.PierApiToken) ||
-                string.IsNullOrWhiteSpace(req.PlexxerAppId) ||
-                string.IsNullOrWhiteSpace(req.PlexxerApiToken) ||
-                string.IsNullOrWhiteSpace(req.ScopeBrief))
+            if (string.IsNullOrWhiteSpace(req.PierApiToken) || string.IsNullOrWhiteSpace(req.ScopeBrief))
                 return Results.BadRequest(new { error = "required-fields-missing" });
+
+            // Plexxer creds are optional overall, but must be provided as a
+            // pair — appId alone or token alone is a misconfiguration.
+            var hasPlexxerAppId = !string.IsNullOrWhiteSpace(req.PlexxerAppId);
+            var hasPlexxerToken = !string.IsNullOrWhiteSpace(req.PlexxerApiToken);
+            if (hasPlexxerAppId != hasPlexxerToken)
+                return Results.BadRequest(new { error = "plexxer-both-or-neither",
+                    message = "Plexxer app id and API token must be provided together, or both omitted." });
 
             if (await store.PierAppNameExistsAsync(req.PierAppName, ct))
                 return Results.Conflict(new { error = "pier-app-name-already-in-use" });
@@ -47,9 +53,12 @@ public static class ProjectsEndpoints
             var pier = await verifier.VerifyPierAsync(req.PierAppName, req.PierApiToken, ct);
             if (!pier.Ok)
                 return Results.BadRequest(new { error = "pier-token-rejected", message = pier.Message });
-            var plex = await verifier.VerifyPlexxerAsync(req.PlexxerAppId, req.PlexxerApiToken, ct);
-            if (!plex.Ok)
-                return Results.BadRequest(new { error = "plexxer-token-rejected", message = plex.Message });
+            if (hasPlexxerAppId)
+            {
+                var plex = await verifier.VerifyPlexxerAsync(req.PlexxerAppId!, req.PlexxerApiToken!, ct);
+                if (!plex.Ok)
+                    return Results.BadRequest(new { error = "plexxer-token-rejected", message = plex.Message });
+            }
 
             var now = DateTime.UtcNow;
             var created = await store.CreateAsync(new Project
@@ -57,8 +66,8 @@ public static class ProjectsEndpoints
                 name            = req.Name.Trim(),
                 pierAppName     = req.PierAppName.Trim(),
                 pierApiToken    = req.PierApiToken,
-                plexxerAppId    = req.PlexxerAppId.Trim(),
-                plexxerApiToken = req.PlexxerApiToken,
+                plexxerAppId    = hasPlexxerAppId ? req.PlexxerAppId!.Trim() : null,
+                plexxerApiToken = hasPlexxerToken ? req.PlexxerApiToken    : null,
                 scopeBrief      = req.ScopeBrief,
                 workspaceStatus = WorkspaceStatus.Draft,
                 createdAt       = now,
@@ -94,11 +103,26 @@ public static class ProjectsEndpoints
                 if (!pier.Ok) return Results.BadRequest(new { error = "pier-token-rejected", message = pier.Message });
                 patch["pierApiToken"] = req.PierApiToken;
             }
-            if (!string.IsNullOrWhiteSpace(req.PlexxerApiToken))
+            // Allow setting both Plexxer fields in one PATCH (e.g. configuring
+            // Plexxer on a project that was created without it). Clear both
+            // if the admin sends empty strings for both.
+            var newAppId = req.PlexxerAppId;
+            var newToken = req.PlexxerApiToken;
+            var effectiveAppId = newAppId ?? existing.plexxerAppId;
+            var effectiveToken = newToken ?? existing.plexxerApiToken;
+            if (newAppId is not null || newToken is not null)
             {
-                var plex = await verifier.VerifyPlexxerAsync(existing.plexxerAppId, req.PlexxerApiToken, ct);
-                if (!plex.Ok) return Results.BadRequest(new { error = "plexxer-token-rejected", message = plex.Message });
-                patch["plexxerApiToken"] = req.PlexxerApiToken;
+                var hasEff = !string.IsNullOrWhiteSpace(effectiveAppId) || !string.IsNullOrWhiteSpace(effectiveToken);
+                var bothEff = !string.IsNullOrWhiteSpace(effectiveAppId) && !string.IsNullOrWhiteSpace(effectiveToken);
+                if (hasEff && !bothEff)
+                    return Results.BadRequest(new { error = "plexxer-both-or-neither" });
+                if (bothEff)
+                {
+                    var plex = await verifier.VerifyPlexxerAsync(effectiveAppId!, effectiveToken!, ct);
+                    if (!plex.Ok) return Results.BadRequest(new { error = "plexxer-token-rejected", message = plex.Message });
+                }
+                if (newAppId is not null) patch["plexxerAppId"]    = string.IsNullOrWhiteSpace(newAppId) ? null : newAppId.Trim();
+                if (newToken is not null) patch["plexxerApiToken"] = string.IsNullOrWhiteSpace(newToken) ? null : newToken;
             }
 
             if (patch.Count == 0) return Results.Ok(ToDto(await SafeAfterPatchAsync(store, id, ct) ?? existing));
@@ -118,7 +142,7 @@ public static class ProjectsEndpoints
         string Id,
         string Name,
         string PierAppName,
-        string PlexxerAppId,
+        string? PlexxerAppId,
         string ScopeBrief,
         string WorkspaceStatus,
         DateTime CreatedAt,

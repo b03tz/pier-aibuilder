@@ -84,34 +84,40 @@ public sealed class DeployOrchestrator
         var workspace = _ws.ResolvePath(project.pierAppName);
         var backendDir  = Path.Combine(workspace, "backend");
         var frontendDir = Path.Combine(workspace, "frontend");
+        var hasBackend  = Directory.Exists(backendDir)  && Directory.EnumerateFileSystemEntries(backendDir).Any();
+        var hasFrontend = Directory.Exists(frontendDir) && Directory.EnumerateFileSystemEntries(frontendDir).Any();
 
-        if (!Directory.Exists(backendDir))
-            return new Result("", "failed", null, null, $"no backend/ directory at {backendDir}");
+        if (!hasBackend && !hasFrontend)
+            return new Result("", "failed", null, null,
+                $"neither backend/ nor frontend/ present at {workspace} — nothing to deploy");
 
-        // 1. dotnet publish → zip
-        notes.AppendLine("[step] dotnet publish");
-        var publishOut = Path.Combine(workspace, ".aibuilder", "publish");
-        if (Directory.Exists(publishOut)) Directory.Delete(publishOut, recursive: true);
-        // Run `dotnet publish` with cwd = backend/. Dotnet auto-discovers the
-        // csproj/sln in cwd. If the workspace has a more complex layout the
-        // generated app is responsible for structuring it so this call finds
-        // the right project — the system prompt mandates `backend/` at the
-        // workspace root.
-        var pub = await _publish.DotnetPublishAsync(backendDir, publishOut, ct);
-        notes.AppendLine(TrimForNotes(pub.Stdout, 2000));
-        if (pub.ExitCode != 0)
+        // 1. dotnet publish → zip (if backend present)
+        string? backendZip = null;
+        if (hasBackend)
         {
-            notes.AppendLine($"STDERR:\n{TrimForNotes(pub.Stderr, 2000)}");
-            return new Result("", "failed", null, null, "dotnet publish failed");
+            notes.AppendLine("[step] dotnet publish");
+            var publishOut = Path.Combine(workspace, ".aibuilder", "publish");
+            if (Directory.Exists(publishOut)) Directory.Delete(publishOut, recursive: true);
+            // cwd = backend/; dotnet auto-discovers the csproj/sln there.
+            var pub = await _publish.DotnetPublishAsync(backendDir, publishOut, ct);
+            notes.AppendLine(TrimForNotes(pub.Stdout, 2000));
+            if (pub.ExitCode != 0)
+            {
+                notes.AppendLine($"STDERR:\n{TrimForNotes(pub.Stderr, 2000)}");
+                return new Result("", "failed", null, null, "dotnet publish failed");
+            }
+            backendZip = Path.Combine(workspace, ".aibuilder", "backend.zip");
+            ZipBuilder.CreateFromDirectory(publishOut, backendZip);
+            notes.AppendLine($"[step] backend.zip = {new FileInfo(backendZip).Length:N0} bytes");
+        }
+        else
+        {
+            notes.AppendLine("[step] no backend/ — skipping dotnet publish");
         }
 
-        var backendZip = Path.Combine(workspace, ".aibuilder", "backend.zip");
-        ZipBuilder.CreateFromDirectory(publishOut, backendZip);
-        notes.AppendLine($"[step] backend.zip = {new FileInfo(backendZip).Length:N0} bytes");
-
-        // 2. npm build → zip (optional)
+        // 2. npm build → zip (if frontend present)
         string? frontendZip = null;
-        if (Directory.Exists(frontendDir))
+        if (hasFrontend)
         {
             notes.AppendLine("[step] npm install && npm run build");
             var fe = await _publish.NpmInstallAndBuildAsync(frontendDir, ct);
@@ -127,6 +133,10 @@ public sealed class DeployOrchestrator
             frontendZip = Path.Combine(workspace, ".aibuilder", "frontend.zip");
             ZipBuilder.CreateFromDirectory(distDir, frontendZip);
             notes.AppendLine($"[step] frontend.zip = {new FileInfo(frontendZip).Length:N0} bytes");
+        }
+        else
+        {
+            notes.AppendLine("[step] no frontend/ — skipping npm build");
         }
 
         using var http = _httpFactory.CreateClient();
@@ -150,14 +160,18 @@ public sealed class DeployOrchestrator
             resp.Dispose();
         }
 
-        // 4. Upload backend zip
-        await limiter.WaitAsync(ct);
-        var backendUpload = await pier.DeployBackendAsync(backendZip, $"aibuilder build {project.Id}", ct);
-        notes.AppendLine($"[step] POST /deploy -> {backendUpload.Status}");
-        notes.AppendLine(TrimForNotes(backendUpload.Body, 1500));
-        if (backendUpload.Status >= 400)
-            return new Result("", "failed", null, null, $"backend deploy returned {backendUpload.Status}");
-        var backendVersion = TryParseVersion(backendUpload.Body);
+        // 4. Upload backend zip (if we built one)
+        double? backendVersion = null;
+        if (backendZip is not null)
+        {
+            await limiter.WaitAsync(ct);
+            var backendUpload = await pier.DeployBackendAsync(backendZip, $"aibuilder build {project.Id}", ct);
+            notes.AppendLine($"[step] POST /deploy -> {backendUpload.Status}");
+            notes.AppendLine(TrimForNotes(backendUpload.Body, 1500));
+            if (backendUpload.Status >= 400)
+                return new Result("", "failed", null, null, $"backend deploy returned {backendUpload.Status}");
+            backendVersion = TryParseVersion(backendUpload.Body);
+        }
 
         // 5. Upload frontend zip (if we built one)
         double? frontendVersion = null;

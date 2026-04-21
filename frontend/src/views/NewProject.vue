@@ -3,19 +3,26 @@
     <h1 class="text-h5 mb-4">New project</h1>
     <v-card class="pa-6" max-width="720">
       <v-form @submit.prevent="onSubmit">
-        <v-text-field v-model="form.name" label="Project name" class="mb-3" />
+        <v-text-field v-model="form.name" label="Project name *" class="mb-3" />
         <v-text-field
           v-model="form.pierAppName"
-          label="Pier app name (subdomain)"
+          label="Pier app name (subdomain) *"
           hint="Must match ^[a-z][a-z0-9-]{0,39}$"
           class="mb-3"
         />
-        <v-text-field v-model="form.pierApiToken" label="Pier API token" type="password" class="mb-3" />
+        <v-text-field v-model="form.pierApiToken" label="Pier API token *" type="password" class="mb-3" />
+
+        <v-divider class="my-4" />
+        <div class="text-caption text-medium-emphasis mb-2">
+          Plexxer (optional — leave both fields empty for apps that don't need persistence, e.g. pure frontend apps).
+        </div>
         <v-text-field v-model="form.plexxerAppId" label="Plexxer app ID" class="mb-3" />
         <v-text-field v-model="form.plexxerApiToken" label="Plexxer API token" type="password" class="mb-3" />
+
+        <v-divider class="my-4" />
         <v-textarea
           v-model="form.scopeBrief"
-          label="Scope brief"
+          label="Scope brief *"
           hint="What should this app do? One-liner is fine — you'll refine in the scope conversation."
           rows="4"
           class="mb-4"
@@ -52,7 +59,14 @@ async function onSubmit() {
   busy.value = true
   error.value = null
   try {
-    const p = await api.post<ProjectDto>('/api/projects', form)
+    // Normalise empty strings → undefined so the backend sees "not provided"
+    // instead of "provided empty". Helps the both-or-neither check pass.
+    const body = {
+      ...form,
+      plexxerAppId: form.plexxerAppId.trim() || undefined,
+      plexxerApiToken: form.plexxerApiToken.trim() || undefined,
+    }
+    const p = await api.post<ProjectDto>('/api/projects', body)
     router.push({ name: 'project', params: { id: p.id } })
   } catch (e: any) {
     error.value = formatError(e)
