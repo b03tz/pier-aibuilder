@@ -182,6 +182,15 @@ public sealed class BuildOrchestrator
         var systemPrompt = BuildPromptAssembler.BuildSystemPrompt(project);
         var userPrompt = BuildPromptAssembler.BuildUserPrompt(project, scopeTurns, isIteration);
 
+        // Inject the project's own Plexxer creds so the agent can hit the
+        // control plane (create/patch schemas, download the regenerated
+        // client). The system prompt tells the agent these are the tokens
+        // to use; we ship them here. AiBuilder's own creds stay stripped
+        // because the agent has no business with them.
+        var extraEnv = new Dictionary<string, string>();
+        if (!string.IsNullOrWhiteSpace(project.plexxerAppId))     extraEnv["PLEXXER_APP_ID"]    = project.plexxerAppId!;
+        if (!string.IsNullOrWhiteSpace(project.plexxerApiToken))  extraEnv["PLEXXER_API_TOKEN"] = project.plexxerApiToken!;
+
         var exitCode = await _cli.RunStreamingAsync(
             new ClaudeCli.RunOptions(
                 Prompt: userPrompt,
@@ -189,7 +198,8 @@ public sealed class BuildOrchestrator
                 AppendSystemPrompt: systemPrompt,
                 DangerouslySkipPermissions: true,
                 Timeout: TimeSpan.FromMinutes(30),
-                StreamJson: true),
+                StreamJson: true,
+                ExtraEnv: extraEnv),
             onStdout: line => { foreach (var formatted in StreamJsonFormatter.Format(line)) stream.Write(formatted); },
             onStderr: line => stream.Write("[stderr] " + line),
             ct);

@@ -94,7 +94,14 @@ public sealed class ClaudeCli
         bool DangerouslySkipPermissions = false,
         string? DisallowedTools = null,
         TimeSpan? Timeout = null,
-        bool StreamJson = false);
+        bool StreamJson = false,
+        // Per-call env vars to inject into the subprocess on top of the
+        // minimal allow-list (PATH / HOME / LANG / etc.). Used by builds to
+        // pass the project's Plexxer creds so the agent can hit the
+        // control plane. AiBuilder's own secrets must NOT come through
+        // here — use this only for credentials the built app is expected
+        // to read at its runtime.
+        IReadOnlyDictionary<string, string>? ExtraEnv = null);
 
     public async Task<RunResult> RunAsync(RunOptions opts, CancellationToken ct)
     {
@@ -164,6 +171,9 @@ public sealed class ClaudeCli
         CopyIfSet(psi, "LANG");
         CopyIfSet(psi, "LC_ALL");
         CopyIfSet(psi, "TERM");
+        if (opts.ExtraEnv is not null)
+            foreach (var (k, v) in opts.ExtraEnv)
+                psi.Environment[k] = v;
 
         using var p = new Process { StartInfo = psi };
         p.OutputDataReceived += (_, e) => { if (e.Data is not null) onStdout(e.Data); };
