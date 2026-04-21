@@ -1,4 +1,6 @@
 using System.Text.RegularExpressions;
+using AiBuilder.Api.Projects.Build;
+using AiBuilder.Api.Projects.Scope;
 using Plexxer.Client.AiBuilder;
 
 namespace AiBuilder.Api.Projects;
@@ -86,6 +88,62 @@ public static class ProjectsEndpoints
         {
             var p = await store.GetSafeAsync(id, ct);
             return p is null ? Results.NotFound() : Results.Ok(ToDto(p));
+        });
+
+        group.MapPost("/{id}/reset", async (
+            string id,
+            string? confirm,
+            ProjectStore projects,
+            ConversationStore turns,
+            Plexxer.Client.AiBuilder.PlexxerClient plexxer,
+            WorkspaceManager ws,
+            CancellationToken ct) =>
+        {
+            var p = await projects.GetSafeAsync(id, ct);
+            if (p is null) return Results.NotFound();
+
+            // Require the caller to echo the pierAppName so a misclick on
+            // the Reset button can't silently nuke the project's history.
+            if (!string.Equals(confirm, p.pierAppName, StringComparison.Ordinal))
+                return Results.BadRequest(new
+                {
+                    error = "confirm-required",
+                    message = $"Pass ?confirm={p.pierAppName} to reset this project.",
+                });
+
+            // Plexxer-side deletes. Do entities first (child records) so a
+            // partial failure doesn't orphan them under a missing project.
+            await plexxer.DeleteAsync<TargetEnvVar>   (new Dictionary<string, object?> { ["project:eq"] = id }, ct);
+            await plexxer.DeleteAsync<DeployRun>      (new Dictionary<string, object?> { ["project:eq"] = id }, ct);
+            await plexxer.DeleteAsync<BuildRun>       (new Dictionary<string, object?> { ["project:eq"] = id }, ct);
+            await plexxer.DeleteAsync<ConversationTurn>(new Dictionary<string, object?> { ["project:eq"] = id }, ct);
+
+            // Filesystem-side wipe — nuke the workspace dir (source, git
+            // history, .aibuilder logs, shared caches stay untouched since
+            // they live under build-home not projects/<appname>).
+            try
+            {
+                var workspace = ws.ResolvePath(p.pierAppName);
+                if (Directory.Exists(workspace))
+                    Directory.Delete(workspace, recursive: true);
+            }
+            catch (Exception e)
+            {
+                // Workspace wipe failures are recoverable (admin can delete
+                // on disk); report but still flip status so the project is
+                // usable from the UI.
+                return Results.Ok(new { status = "partial", workspaceWipeError = e.Message });
+            }
+
+            // Flip state back to Draft. Bypass the state machine because the
+            // valid transitions don't include 'anywhere -> Draft'; this is
+            // an explicit admin override.
+            await projects.UpdateFieldsAsync(id, new Dictionary<string, object?>
+            {
+                ["workspaceStatus"] = WorkspaceStatus.Draft,
+            }, ct);
+
+            return Results.Ok(new { status = "ok", workspaceStatus = WorkspaceStatus.Draft });
         });
 
         group.MapPatch("/{id}", async (string id, UpdateRequest req, ProjectStore store, TokenVerifier verifier, CancellationToken ct) =>

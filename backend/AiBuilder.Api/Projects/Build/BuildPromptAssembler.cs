@@ -27,18 +27,25 @@ public static class BuildPromptAssembler
     1. Decide what entities the app needs, based on the scope.
     2. For each entity: create it with a single call:
          POST https://api.plexxer.com/apps/{{project.plexxerAppId}}/schemas
-         body: {"entityName":"Message","document":{"fields":[
-           {"name":"name","type":"string","required":true},
-           {"name":"body","type":"string","required":true},
-           {"name":"createdAt","type":"date","required":true}
-         ]}}
+         body (pretty-printed):
+           {
+             "entityName": "Message",
+             "document": {
+               "fields": [
+                 {"name": "name",      "type": "string", "required": true},
+                 {"name": "body",      "type": "string", "required": true},
+                 {"name": "createdAt", "type": "date",   "required": true}
+               ]
+             }
+           }
        Schemas auto-publish on creation.
     3. To modify an existing entity, PATCH its draft then POST publish:
          PATCH /apps/{appKey}/schemas/{entity}/draft
-         body: {"document":{"fields":[...full new field list...]}}
+         body: the full desired `document.fields` list (same shape as above)
          POST  /apps/{appKey}/schemas/{entity}/publish
-         body: {}                           (or `{"confirm":"{entity}"}`
-                                              if diff is flagged risky)
+         body: an empty JSON object, OR a JSON object with a `confirm`
+               key whose value equals the entity name, if the diff is
+               flagged risky
     4. After any schema change, DOWNLOAD the regenerated C# client zip:
          GET https://api.plexxer.com/apps/{{project.plexxerAppId}}/client/csharp
        It's a zip with `.csproj`, `PlexxerClient.cs`, and
