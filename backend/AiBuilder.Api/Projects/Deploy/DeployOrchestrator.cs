@@ -233,7 +233,59 @@ public sealed class DeployOrchestrator
             catch (Exception e) { notes.AppendLine($"[step] log tail failed: {e.Message}"); }
         }
 
+        // 9. Per-project cleanup. Everything we wrote during deploy is
+        // regenerable from scratch on the next run and takes up significant
+        // disk (frontend/node_modules alone can be hundreds of MB). Shared
+        // caches under APP_DATA_DIR/build-home stay intact so the next
+        // deploy's npm install / dotnet publish is fast.
+        CleanupAfterSuccess(workspace, notes);
+
         return new Result("", "succeeded", backendVersion, frontendVersion, notes.ToString());
+    }
+
+    private static void CleanupAfterSuccess(string workspace, System.Text.StringBuilder notes)
+    {
+        long beforeBytes = TryDirectorySize(workspace);
+
+        // .aibuilder intermediates (zip + publish output). Keep the transcript
+        // log under .aibuilder — it's small and we reference it from
+        // BuildRun.transcriptPath.
+        TryDeleteDir(Path.Combine(workspace, ".aibuilder", "publish"));
+        TryDeleteFile(Path.Combine(workspace, ".aibuilder", "backend.zip"));
+        TryDeleteFile(Path.Combine(workspace, ".aibuilder", "frontend.zip"));
+
+        // Per-half build caches. Claude may re-run `dotnet build` next
+        // iteration, so bin/obj come back — cheap to delete here.
+        TryDeleteDir(Path.Combine(workspace, "backend", "bin"));
+        TryDeleteDir(Path.Combine(workspace, "backend", "obj"));
+        TryDeleteDir(Path.Combine(workspace, "frontend", "node_modules"));
+        TryDeleteDir(Path.Combine(workspace, "frontend", "dist"));
+
+        long afterBytes = TryDirectorySize(workspace);
+        var saved = beforeBytes - afterBytes;
+        if (saved > 0)
+            notes.AppendLine($"[cleanup] freed {saved / (1024 * 1024):N0} MB of per-project build artifacts");
+    }
+
+    private static void TryDeleteDir(string path)
+    {
+        try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); }
+        catch { /* best effort — cleanup failures shouldn't fail the deploy */ }
+    }
+    private static void TryDeleteFile(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch { /* best effort */ }
+    }
+    private static long TryDirectorySize(string path)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories)
+                .Select(f => { try { return new FileInfo(f).Length; } catch { return 0L; } })
+                .Sum();
+        }
+        catch { return 0L; }
     }
 
     private static double? TryParseVersion(string body)
