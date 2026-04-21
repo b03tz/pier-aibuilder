@@ -3,6 +3,16 @@
     <div class="d-flex align-center mb-4">
       <h3 class="text-h6 flex-grow-1">Builds</h3>
       <v-btn
+        v-if="runningRunId"
+        color="error"
+        variant="outlined"
+        class="mr-2"
+        :loading="cancelling"
+        @click="onCancel"
+      >
+        Cancel
+      </v-btn>
+      <v-btn
         color="primary"
         :disabled="!canBuild"
         :loading="starting"
@@ -50,10 +60,12 @@ const runs = ref<BuildRunDto[]>([])
 const logText = ref('')
 const logEl = ref<HTMLPreElement>()
 const starting = ref(false)
+const cancelling = ref(false)
 let eventSource: EventSource | null = null
 
 const canBuild = computed(() => props.project.workspaceStatus === 'ScopeLocked')
 const isIteration = computed(() => runs.value.some((r) => r.status === 'succeeded'))
+const runningRunId = computed(() => runs.value.find((r) => r.status === 'running')?.id ?? null)
 
 async function loadRuns() {
   runs.value = await api.get<BuildRunDto[]>(`/api/projects/${props.project.id}/builds`)
@@ -86,6 +98,19 @@ function attach(runId: string) {
     emit('changed')
   })
   eventSource.onerror = () => closeStream()
+}
+
+async function onCancel() {
+  const rid = runningRunId.value
+  if (!rid) return
+  cancelling.value = true
+  try {
+    await api.post(`/api/projects/${props.project.id}/builds/${rid}/cancel`)
+    // The SSE stream will emit the [aibuilder] build cancelled line shortly;
+    // the run-list refresh happens in the stream's `end` handler.
+  } finally {
+    cancelling.value = false
+  }
 }
 
 async function onBuild() {

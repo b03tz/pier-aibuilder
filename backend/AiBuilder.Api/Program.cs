@@ -92,6 +92,16 @@ app.UseCors("default");
 app.UseAuthentication();
 app.UseAuthorization();
 
+// Startup reconciliation: flip any stuck "running" BuildRun from a previous
+// process to "failed", and roll affected projects back to ScopeLocked.
+// Fire-and-forget — we don't want a flaky Plexxer to block boot.
+_ = Task.Run(async () =>
+{
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+    try { await app.Services.GetRequiredService<BuildOrchestrator>().ReconcileOrphansOnStartupAsync(cts.Token); }
+    catch (Exception e) { app.Logger.LogWarning(e, "orphan reconciliation crashed"); }
+});
+
 app.MapHealth();
 app.MapPublicEnv();
 app.MapAuth();

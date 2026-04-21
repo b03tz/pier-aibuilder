@@ -19,6 +19,56 @@ public sealed class BuildOrchestrator
 
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> ProjectLocks = new();
 
+    // Per-run cancellation handles. Populated when a build starts, removed
+    // when it finishes. POST /builds/{runId}/cancel flips the matching CTS.
+    private static readonly ConcurrentDictionary<string, CancellationTokenSource> RunCts = new();
+
+    public bool Cancel(string runId)
+    {
+        if (!RunCts.TryGetValue(runId, out var cts)) return false;
+        try { cts.Cancel(); } catch (ObjectDisposedException) { return false; }
+        return true;
+    }
+
+    // Call once at boot. Any BuildRun with status=running predates this
+    // process, so its orchestrator is gone; mark those failed and roll the
+    // owning project back from Building/Updating to ScopeLocked.
+    public async Task ReconcileOrphansOnStartupAsync(CancellationToken ct)
+    {
+        List<BuildRun> orphans;
+        try { orphans = await _runs.ListRunningAsync(ct); }
+        catch (Exception e)
+        {
+            _log.LogWarning(e, "orphan reconciliation failed at startup — skipping");
+            return;
+        }
+        if (orphans.Count == 0) return;
+        _log.LogWarning("reconciling {N} orphaned BuildRun(s) left over from a previous process", orphans.Count);
+        foreach (var r in orphans)
+        {
+            try
+            {
+                await _runs.MarkFinishedAsync(r.Id!, "failed",
+                    "orphaned: AiBuilder restarted or crashed before the subprocess could finish", ct);
+
+                var projectId = r.project.Id;
+                if (!string.IsNullOrEmpty(projectId))
+                {
+                    var p = await _projects.GetSafeAsync(projectId, ct);
+                    if (p is not null &&
+                        (p.workspaceStatus == WorkspaceStatus.Building || p.workspaceStatus == WorkspaceStatus.Updating))
+                    {
+                        await _projects.SetStatusAsync(projectId, p.workspaceStatus, WorkspaceStatus.ScopeLocked, ct);
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                _log.LogWarning(e, "failed to reconcile orphan run {RunId}", r.Id);
+            }
+        }
+    }
+
     public BuildOrchestrator(
         ProjectStore projects, ConversationStore turns, BuildRunStore runs,
         WorkspaceManager ws, BuildStreamHub hub, ClaudeCli cli,
@@ -71,12 +121,27 @@ public sealed class BuildOrchestrator
         // Fire-and-forget the actual build. Errors are captured into the run
         // record + stream; they never propagate into the HTTP response of
         // `POST /build` (which only reports "run started").
+        var runCts = new CancellationTokenSource();
+        RunCts[run.Id!] = runCts;
+
         _ = Task.Run(async () =>
         {
             var stream = _hub.Create(run.Id!, transcriptPath);
             try
             {
-                await RunBuildAsync(project, run.Id!, isIteration, workspacePath, stream, finalSuccessStatus, targetStatus);
+                await RunBuildAsync(project, run.Id!, isIteration, workspacePath, stream, finalSuccessStatus, targetStatus, runCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                _log.LogWarning("build {RunId} cancelled by admin", run.Id);
+                stream.Write("[aibuilder] build cancelled by admin");
+                stream.Complete("failed", "cancelled");
+                try
+                {
+                    await _runs.MarkFinishedAsync(run.Id!, "failed", "cancelled", CancellationToken.None);
+                    await _projects.SetStatusAsync(projectId, targetStatus, WorkspaceStatus.ScopeLocked, CancellationToken.None);
+                }
+                catch { /* best effort */ }
             }
             catch (Exception e)
             {
@@ -90,7 +155,12 @@ public sealed class BuildOrchestrator
                 }
                 catch { /* best effort */ }
             }
-            finally { sem.Release(); }
+            finally
+            {
+                RunCts.TryRemove(run.Id!, out _);
+                runCts.Dispose();
+                sem.Release();
+            }
         }, CancellationToken.None);
 
         return new StartResult(run.Id!, kind, workspacePath);
@@ -98,7 +168,8 @@ public sealed class BuildOrchestrator
 
     private async Task RunBuildAsync(
         Project project, string runId, bool isIteration, string workspacePath,
-        BuildStream stream, string finalSuccessStatus, string inProgressStatus)
+        BuildStream stream, string finalSuccessStatus, string inProgressStatus,
+        CancellationToken ct)
     {
         var scopeTurns = await _turns.ListAsync(project.Id!, CancellationToken.None);
 
@@ -118,7 +189,7 @@ public sealed class BuildOrchestrator
                 StreamJson: true),
             onStdout: line => { foreach (var formatted in StreamJsonFormatter.Format(line)) stream.Write(formatted); },
             onStderr: line => stream.Write("[stderr] " + line),
-            CancellationToken.None);
+            ct);
 
         if (exitCode != 0)
         {

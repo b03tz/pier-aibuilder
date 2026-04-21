@@ -63,4 +63,11 @@ public sealed class BuildRunStore
         }, ct);
         return n > 0;
     }
+
+    public async Task<List<BuildRun>> ListRunningAsync(CancellationToken ct) =>
+        await _plexxer.ReadAsync<BuildRun>(new Dictionary<string, object?>
+        {
+            ["status:eq"] = "running",
+            ["query"]     = new Dictionary<string, object?> { ["limit"] = 200 },
+        }, ct);
 }

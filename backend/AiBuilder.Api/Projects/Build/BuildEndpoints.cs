@@ -28,6 +28,14 @@ public static class BuildEndpoints
             catch (InvalidOperationException e) { return Results.Conflict(new { error = e.Message }); }
         });
 
+        group.MapPost("/builds/{runId}/cancel", (string id, string runId, BuildOrchestrator orch) =>
+        {
+            // Returns 200 if we found a running run to cancel, 404 otherwise.
+            // Cancellation is asynchronous — the SSE stream will emit the
+            // "cancelled" line and the BuildRun will flip to failed shortly.
+            return orch.Cancel(runId) ? Results.Ok(new { cancelled = true }) : Results.NotFound();
+        });
+
         group.MapGet("/builds", async (string id, BuildRunStore runs, CancellationToken ct) =>
         {
             var list = await runs.ListForProjectAsync(id, ct);
