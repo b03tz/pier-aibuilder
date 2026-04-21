@@ -41,6 +41,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { api, type BuildRunDto, type ProjectDto } from '../api/client'
+import { useConfigStore } from '../stores/config'
 
 const props = defineProps<{ project: ProjectDto }>()
 const emit = defineEmits<{ (e: 'changed'): void }>()
@@ -72,7 +73,9 @@ function closeStream() {
 function attach(runId: string) {
   closeStream()
   logText.value = ''
-  eventSource = new EventSource(`/api/projects/${props.project.id}/builds/${runId}/stream`, { withCredentials: true })
+  const cfg = useConfigStore()
+  const base = cfg.apiBase && cfg.apiBase !== window.location.origin ? cfg.apiBase.replace(/\/$/, '') : ''
+  eventSource = new EventSource(`${base}/api/projects/${props.project.id}/builds/${runId}/stream`, { withCredentials: true })
   eventSource.addEventListener('line', (ev) => {
     logText.value += (ev as MessageEvent).data + '\n'
     scrollLog()

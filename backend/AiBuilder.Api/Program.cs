@@ -49,7 +49,8 @@ builder.Services.AddAuthentication(AuthEndpoints.CookieScheme)
         opts.Cookie.Name = "AiBuilderAuth";
         opts.Cookie.HttpOnly = true;
         opts.Cookie.SameSite = SameSiteMode.Lax;
-        opts.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+        // In prod we only accept the cookie over HTTPS; in dev over either.
+        opts.Cookie.SecurePolicy = env.Prod ? CookieSecurePolicy.Always : CookieSecurePolicy.SameAsRequest;
         opts.ExpireTimeSpan = TimeSpan.FromDays(14);
         opts.SlidingExpiration = true;
         // API returns 401/403 JSON instead of redirecting to a login page.
@@ -72,16 +73,21 @@ builder.Services.Configure<JsonOptions>(o =>
     o.SerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
 });
 
-// Dev-only CORS for the Vite dev server. Production serves the built frontend
-// from this process's static files, so no CORS needed there.
-builder.Services.AddCors(o => o.AddPolicy("dev", p => p
-    .WithOrigins("http://localhost:5173", "http://127.0.0.1:5173")
-    .AllowAnyHeader().AllowAnyMethod().AllowCredentials()));
+// CORS: in dev the Vite dev server on :5173 calls the backend on :5218.
+// In prod on Pier the browser app runs on <app>.onpier.tech and the API on
+// api-<app>.onpier.tech — same-site but different origin, credentials
+// required. Origins come from env so we don't hardcode.
+var devOrigins = new[] { "http://localhost:5173", "http://127.0.0.1:5173" };
+var prodOrigins = env.FrontendOrigin is null ? Array.Empty<string>() : new[] { env.FrontendOrigin };
+builder.Services.AddCors(o => o.AddPolicy("default", p =>
+{
+    p.WithOrigins(devOrigins.Concat(prodOrigins).ToArray())
+     .AllowAnyHeader().AllowAnyMethod().AllowCredentials();
+}));
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
-    app.UseCors("dev");
+app.UseCors("default");
 
 app.UseAuthentication();
 app.UseAuthorization();

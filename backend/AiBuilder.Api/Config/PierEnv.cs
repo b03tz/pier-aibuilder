@@ -4,7 +4,9 @@ public sealed record PierEnv(
     string PlexxerAppId,
     string PlexxerApiToken,
     string AppDataDir,
-    string? PublicApiBase)
+    string? PublicApiBase,
+    string? FrontendOrigin,
+    bool Prod)
 {
     public static PierEnv LoadOrThrow()
     {
@@ -18,10 +20,18 @@ public sealed record PierEnv(
         var appDataDir = Require("APP_DATA_DIR");
         Directory.CreateDirectory(appDataDir);
 
+        var aspEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production";
+
         return new PierEnv(
             PlexxerAppId:    Require("PLEXXER_APP_ID"),
             PlexxerApiToken: Require("PLEXXER_API_TOKEN"),
             AppDataDir:      appDataDir,
-            PublicApiBase:   Environment.GetEnvironmentVariable("PUBLIC_API_BASE"));
+            PublicApiBase:   Environment.GetEnvironmentVariable("PUBLIC_API_BASE"),
+            // Non-secret: where the browser app lives. In dev, Vite proxy
+            // makes this irrelevant (same-origin). In prod the backend serves
+            // from api-<app>.onpier.tech and the frontend from <app>.onpier.tech
+            // so CORS must allow that origin with credentials.
+            FrontendOrigin:  Environment.GetEnvironmentVariable("FRONTEND_ORIGIN"),
+            Prod:            !string.Equals(aspEnv, "Development", StringComparison.OrdinalIgnoreCase));
     }
 }

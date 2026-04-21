@@ -1,16 +1,28 @@
-// Tiny fetch wrapper. Paths are same-origin — they go through Vite's proxy
-// in dev and hit the static-file-serving backend in prod. All requests send
-// credentials so the auth cookie round-trips.
+// Tiny fetch wrapper. In dev: paths are same-origin and go through Vite's
+// proxy to the backend. In prod on Pier: the frontend serves from
+// <app>.onpier.tech and the backend from api-<app>.onpier.tech — so we
+// prefix with `PUBLIC_API_BASE` when it's set to something other than this
+// same origin. `credentials: 'include'` sends the cookie in both cases.
+import { useConfigStore } from '../stores/config'
 
 export interface ApiError extends Error {
   status: number
   body?: unknown
 }
 
+function resolveUrl(path: string): string {
+  if (path.startsWith('http')) return path
+  let base = ''
+  try { base = useConfigStore().apiBase } catch { /* store not ready during boot */ }
+  if (!base) return path
+  if (typeof window !== 'undefined' && base === window.location.origin) return path
+  return base.replace(/\/$/, '') + path
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const r = await fetch(path, {
+  const r = await fetch(resolveUrl(path), {
     method,
-    credentials: 'same-origin',
+    credentials: 'include',
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   })
