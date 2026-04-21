@@ -38,4 +38,19 @@ public sealed class AdminStore
             updatedAt = now,
         }, ct);
     }
+
+    public async Task UpdatePasswordAsync(string adminId, string newPlainPassword, CancellationToken ct = default)
+    {
+        await _plexxer.UpdateAsync<Admin>(
+            new Dictionary<string, object?> { ["_id:eq"] = adminId },
+            new Dictionary<string, object?>
+            {
+                [":set"] = new Dictionary<string, object?>
+                {
+                    ["passwordHash"] = PasswordHasher.Hash(newPlainPassword),
+                    ["updatedAt"]    = DateTime.UtcNow,
+                },
+            },
+            ct);
+    }
 }

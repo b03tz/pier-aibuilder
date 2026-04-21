@@ -21,8 +21,14 @@
         {{ isIteration ? 'Rebuild' : 'Build' }}
       </v-btn>
     </div>
-    <v-alert v-if="!canBuild" type="info" variant="tonal" density="compact" class="mb-3">
-      Lock the scope first to start a build.
+    <v-alert
+      v-if="statusHint"
+      :type="statusHint.type"
+      variant="tonal"
+      density="compact"
+      class="mb-3"
+    >
+      {{ statusHint.message }}
     </v-alert>
 
     <div class="log-frame mb-4">
@@ -66,6 +72,21 @@ let eventSource: EventSource | null = null
 const canBuild = computed(() => props.project.workspaceStatus === 'ScopeLocked')
 const isIteration = computed(() => runs.value.some((r) => r.status === 'succeeded'))
 const runningRunId = computed(() => runs.value.find((r) => r.status === 'running')?.id ?? null)
+
+// Workspace-status → context-sensitive hint. Null = no alert (the Build
+// button speaks for itself when canBuild is true).
+const statusHint = computed<{ type: 'info' | 'success' | 'warning'; message: string } | null>(() => {
+  const s = props.project.workspaceStatus
+  if (s === 'Draft' || s === 'InConversation')
+    return { type: 'info', message: 'Lock the scope first to start a build.' }
+  if (s === 'ScopeLocked') return null
+  if (s === 'Building')    return { type: 'warning', message: 'Building now — watch the log below.' }
+  if (s === 'Updating')    return { type: 'warning', message: 'Updating now — watch the log below.' }
+  if (s === 'DoneBuilding' || s === 'DoneUpdating')
+    return { type: 'success', message: 'Build finished. Deploy from the Deploy tab, or add a scope turn to iterate.' }
+  if (s === 'Deployed')    return { type: 'success', message: 'Deployed. Add a scope turn to start the next iteration.' }
+  return null
+})
 
 async function loadRuns() {
   runs.value = await api.get<BuildRunDto[]>(`/api/projects/${props.project.id}/builds`)

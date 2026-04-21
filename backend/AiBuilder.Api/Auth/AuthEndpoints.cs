@@ -10,6 +10,7 @@ public static class AuthEndpoints
 
     public sealed record LoginRequest(string Username, string Password);
     public sealed record BootstrapRequest(string Username, string Password);
+    public sealed record ChangePasswordRequest(string OldPassword, string NewPassword);
 
     public static void MapAuth(this IEndpointRouteBuilder app)
     {
@@ -59,6 +60,30 @@ public static class AuthEndpoints
         {
             if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
             return Results.Ok(new { username = ctx.User.Identity.Name });
+        }).RequireAuthorization();
+
+        // Password rotation. Requires the cookie AND the current password so
+        // a stolen session can't silently swap credentials.
+        group.MapPost("/change-password", async (ChangePasswordRequest req, AdminStore store, HttpContext ctx, CancellationToken ct) =>
+        {
+            if (string.IsNullOrEmpty(req.OldPassword) || req.NewPassword.Length < 8)
+                return Results.BadRequest(new { error = "new-password-min-8" });
+            if (req.OldPassword == req.NewPassword)
+                return Results.BadRequest(new { error = "new-password-must-differ" });
+
+            var username = ctx.User.Identity?.Name;
+            if (string.IsNullOrEmpty(username)) return Results.Unauthorized();
+
+            var admin = await store.FindByUsernameForAuthAsync(username, ct);
+            if (admin is null || !PasswordHasher.Verify(req.OldPassword, admin.passwordHash))
+                return Results.Unauthorized();
+
+            await store.UpdatePasswordAsync(admin.Id!, req.NewPassword, ct);
+            // Log the current session out so the next request re-authenticates
+            // with the new password. Prevents a leftover cookie from lingering
+            // past a credential rotation.
+            await ctx.SignOutAsync(CookieScheme);
+            return Results.NoContent();
         }).RequireAuthorization();
     }
 }

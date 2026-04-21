@@ -3,19 +3,11 @@
     <p class="text-body-2 text-medium-emphasis mb-4">
       Initial brief: {{ project.scopeBrief }}
     </p>
-    <div class="transcript">
-      <div v-for="t in turns" :key="t.id" :class="['turn', `turn-${t.role}`]">
-        <div class="role">{{ t.role }}</div>
-        <div class="content">{{ t.content }}</div>
-      </div>
-      <div v-if="turns.length === 0" class="text-medium-emphasis text-center py-4">
-        No turns yet. Start the conversation below.
-      </div>
-    </div>
-    <v-divider class="my-4" />
+
+    <!-- Composer at top so the input is always on screen without scrolling. -->
     <template v-if="canTalk">
       <v-textarea v-model="draft" label="Your message" rows="3" class="mb-3" />
-      <div class="d-flex">
+      <div class="d-flex mb-5">
         <v-spacer />
         <v-btn
           v-if="canLock"
@@ -31,9 +23,21 @@
         </v-btn>
       </div>
     </template>
-    <v-alert v-else type="info" variant="tonal">
+    <v-alert v-else type="info" variant="tonal" class="mb-5">
       Scope is {{ project.workspaceStatus }}. Finish the current phase before adding more turns.
     </v-alert>
+
+    <!-- Transcript below, newest first so the turn you just sent appears
+         right under the composer without scrolling. -->
+    <div class="transcript">
+      <div v-if="turns.length === 0" class="text-medium-emphasis text-center py-4">
+        No turns yet. Start the conversation above.
+      </div>
+      <div v-for="t in reversedTurns" :key="t.id" :class="['turn', `turn-${t.role}`]">
+        <div class="role">{{ t.role }}</div>
+        <div class="content">{{ t.content }}</div>
+      </div>
+    </div>
   </v-card>
 </template>
 
@@ -54,6 +58,7 @@ const canTalk = computed(() =>
 const canLock = computed(() =>
   props.project.workspaceStatus === 'InConversation' && turns.value.length > 0,
 )
+const reversedTurns = computed(() => [...turns.value].sort((a, b) => b.turnIndex - a.turnIndex))
 
 async function load() {
   turns.value = await api.get<TurnDto[]>(`/api/projects/${props.project.id}/turns`)
