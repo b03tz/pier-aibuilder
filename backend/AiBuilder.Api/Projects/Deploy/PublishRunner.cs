@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using AiBuilder.Api.Config;
 
 namespace AiBuilder.Api.Projects.Deploy;
 
@@ -9,6 +10,26 @@ namespace AiBuilder.Api.Projects.Deploy;
 // leak into the generated tooling.
 public sealed class PublishRunner
 {
+    private readonly PierEnv _env;
+    private readonly Lazy<string> _buildHome;
+
+    public PublishRunner(PierEnv env)
+    {
+        _env = env;
+        _buildHome = new Lazy<string>(() =>
+        {
+            // HOME for dotnet + npm subprocesses. Both tools want to write
+            // caches to $HOME (npm → .npm, nuget → .nuget/packages) and on
+            // Pier the real HOME is read-only. This path lives under
+            // APP_DATA_DIR which is the one place the app can write.
+            // Distinct from ClaudeCli's claude-home so we don't conflate
+            // the two caches.
+            var p = Path.Combine(env.AppDataDir, "build-home");
+            Directory.CreateDirectory(p);
+            return p;
+        });
+    }
+
     public sealed record RunOutput(int ExitCode, string Stdout, string Stderr);
 
     public async Task<RunOutput> RunAsync(string exe, string[] args, string cwd, CancellationToken ct)
@@ -37,16 +58,24 @@ public sealed class PublishRunner
         foreach (var a in args) psi.ArgumentList.Add(a);
 
         psi.Environment.Clear();
-        foreach (var key in new[] { "PATH", "HOME", "LANG", "LC_ALL", "TERM", "USER", "LOGNAME" })
+        foreach (var key in new[] { "PATH", "LANG", "LC_ALL", "TERM", "USER", "LOGNAME" })
         {
             var v = Environment.GetEnvironmentVariable(key);
             if (v is not null) psi.Environment[key] = v;
         }
-        // Tooling needs these on .NET and Node installs.
-        psi.Environment["DOTNET_ROOT"]         = Environment.GetEnvironmentVariable("DOTNET_ROOT") ?? "";
+        // HOME → writable mirror under APP_DATA_DIR. Pier's real HOME is
+        // read-only and npm/nuget both want to write caches under it.
+        var home = _buildHome.Value;
+        psi.Environment["HOME"] = home;
+        // Belt-and-suspenders: tell each tool its cache dir explicitly in
+        // case something else tries to override HOME.
+        psi.Environment["NPM_CONFIG_CACHE"] = Path.Combine(home, ".npm");
+        psi.Environment["NUGET_PACKAGES"]   = Path.Combine(home, ".nuget", "packages");
+
+        psi.Environment["DOTNET_ROOT"]                 = Environment.GetEnvironmentVariable("DOTNET_ROOT") ?? "";
         psi.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
-        psi.Environment["DOTNET_NOLOGO"] = "1";
-        psi.Environment["NPM_CONFIG_UPDATE_NOTIFIER"] = "false";
+        psi.Environment["DOTNET_NOLOGO"]               = "1";
+        psi.Environment["NPM_CONFIG_UPDATE_NOTIFIER"]  = "false";
 
         using var p = new Process { StartInfo = psi };
         var outBuf = new System.Text.StringBuilder();
