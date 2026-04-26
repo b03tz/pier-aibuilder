@@ -17,9 +17,8 @@ public sealed class BuildOrchestrator
     private readonly BuildStreamHub _hub;
     private readonly ClaudeCli _cli;
     private readonly EnvManifestSeeder _envSeeder;
+    private readonly ProjectLockManager _locks;
     private readonly ILogger<BuildOrchestrator> _log;
-
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ProjectLocks = new();
 
     // Per-run cancellation handles. Populated when a build starts, removed
     // when it finishes. POST /builds/{runId}/cancel flips the matching CTS.
@@ -75,10 +74,12 @@ public sealed class BuildOrchestrator
         ProjectStore projects, ConversationStore turns, BuildRunStore runs,
         WorkspaceManager ws, BuildStreamHub hub, ClaudeCli cli,
         EnvManifestSeeder envSeeder,
+        ProjectLockManager locks,
         ILogger<BuildOrchestrator> log)
     {
         _projects = projects; _turns = turns; _runs = runs;
-        _ws = ws; _hub = hub; _cli = cli; _envSeeder = envSeeder; _log = log;
+        _ws = ws; _hub = hub; _cli = cli; _envSeeder = envSeeder;
+        _locks = locks; _log = log;
     }
 
     public sealed record StartResult(string RunId, string Kind, string WorkspacePath);
@@ -89,7 +90,12 @@ public sealed class BuildOrchestrator
             ?? throw new KeyNotFoundException($"project {projectId} not found");
 
         var currentStatus = project.workspaceStatus;
-        var isIteration = await _runs.HasSucceededBefore(projectId, ct);
+        // Imported projects start with code already in the workspace, so even
+        // their first build is conceptually an update rather than a greenfield
+        // build — that drives both the state machine and the build prompt.
+        var hasPriorSuccess = await _runs.HasSucceededBefore(projectId, ct);
+        var isImport = project.isImported ?? false;
+        var isIteration = hasPriorSuccess || isImport;
         var targetStatus = isIteration ? WorkspaceStatus.Updating : WorkspaceStatus.Building;
         var kind = isIteration ? "update" : "build";
         var finalSuccessStatus = isIteration ? WorkspaceStatus.DoneUpdating : WorkspaceStatus.DoneBuilding;
@@ -97,11 +103,11 @@ public sealed class BuildOrchestrator
         if (!ProjectStateMachine.CanTransition(currentStatus, targetStatus))
             throw new InvalidStateTransitionException(currentStatus, targetStatus);
 
-        // Serialise builds per project so we don't have two claude subprocesses
-        // thrashing the same workspace.
-        var sem = ProjectLocks.GetOrAdd(projectId, _ => new SemaphoreSlim(1, 1));
+        // Serialise workspace-mutating work per project so a build and a
+        // concurrent push (or two builds) can't step on each other.
+        var sem = _locks.Get(projectId);
         if (!await sem.WaitAsync(TimeSpan.Zero, ct))
-            throw new InvalidOperationException($"build already running for project {projectId}");
+            throw new InvalidOperationException($"workspace busy for project {projectId}");
 
         string workspacePath;
         BuildRun run;
@@ -127,12 +133,16 @@ public sealed class BuildOrchestrator
         var runCts = new CancellationTokenSource();
         RunCts[run.Id!] = runCts;
 
+        var promptKind = !hasPriorSuccess && isImport ? BuildPromptAssembler.BuildKind.FirstImported
+                       : isIteration                  ? BuildPromptAssembler.BuildKind.Iteration
+                                                      : BuildPromptAssembler.BuildKind.FirstGreenfield;
+
         _ = Task.Run(async () =>
         {
             var stream = _hub.Create(run.Id!, transcriptPath);
             try
             {
-                await RunBuildAsync(project, run.Id!, isIteration, workspacePath, stream, finalSuccessStatus, targetStatus, runCts.Token);
+                await RunBuildAsync(project, run.Id!, promptKind, workspacePath, stream, finalSuccessStatus, targetStatus, runCts.Token);
             }
             catch (OperationCanceledException)
             {
@@ -170,17 +180,23 @@ public sealed class BuildOrchestrator
     }
 
     private async Task RunBuildAsync(
-        Project project, string runId, bool isIteration, string workspacePath,
+        Project project, string runId, BuildPromptAssembler.BuildKind kind, string workspacePath,
         BuildStream stream, string finalSuccessStatus, string inProgressStatus,
         CancellationToken ct)
     {
         var scopeTurns = await _turns.ListAsync(project.Id!, CancellationToken.None);
 
-        stream.Write($"[aibuilder] starting {(isIteration ? "iteration" : "first build")} for {project.pierAppName}");
+        var label = kind switch
+        {
+            BuildPromptAssembler.BuildKind.FirstGreenfield => "first build",
+            BuildPromptAssembler.BuildKind.FirstImported   => "first build (imported)",
+            _                                              => "iteration",
+        };
+        stream.Write($"[aibuilder] starting {label} for {project.pierAppName}");
         stream.Write($"[aibuilder] workspace: {workspacePath}");
 
         var systemPrompt = BuildPromptAssembler.BuildSystemPrompt(project);
-        var userPrompt = BuildPromptAssembler.BuildUserPrompt(project, scopeTurns, isIteration);
+        var userPrompt = BuildPromptAssembler.BuildUserPrompt(project, scopeTurns, kind);
 
         // Inject the project's own Plexxer creds so the agent can hit the
         // control plane (create/patch schemas, download the regenerated
@@ -216,8 +232,9 @@ public sealed class BuildOrchestrator
 
         try
         {
+            var commitTag = kind == BuildPromptAssembler.BuildKind.Iteration ? "update" : "first";
             await _ws.CommitBuildAsync(project.pierAppName,
-                $"aibuilder build {runId} ({(isIteration ? "update" : "first")})",
+                $"aibuilder build {runId} ({commitTag})",
                 CancellationToken.None);
             stream.Write("[aibuilder] git: committed workspace snapshot");
         }

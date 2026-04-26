@@ -32,6 +32,21 @@ public sealed class Project
     [JsonPropertyName("workspaceStatus")]
     public string workspaceStatus { get; set; }
 
+    [JsonPropertyName("gitRemoteUrl")]
+    public string? gitRemoteUrl { get; set; }
+
+    [JsonPropertyName("gitRemoteBranch")]
+    public string? gitRemoteBranch { get; set; }
+
+    [JsonPropertyName("lastPushSha")]
+    public string? lastPushSha { get; set; }
+
+    [JsonPropertyName("lastPushAt")]
+    public DateTime? lastPushAt { get; set; }
+
+    [JsonPropertyName("isImported")]
+    public bool? isImported { get; set; }
+
     [JsonPropertyName("createdAt")]
     public DateTime createdAt { get; set; }
 

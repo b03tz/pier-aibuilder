@@ -14,11 +14,15 @@ public static class BuildPromptAssembler
     public static string BuildSystemPrompt(Project project)
     {
         var hasPlexxer = !string.IsNullOrWhiteSpace(project.plexxerAppId);
+        var isImport = project.isImported ?? false;
+        var importedPlexxerNudge = isImport && hasPlexxer
+            ? "\n  **This project was IMPORTED.** A Plexxer schema almost certainly already exists. Before creating any new entity, INTROSPECT first via `GET /d/{{appKey}}/_meta` and only modify or extend what's there. Do not redefine entities you don't own.\n"
+            : "";
         var plexxerSection = hasPlexxer
             ? $$"""
 - **Plexxer persistence** — this project has a Plexxer app at
   appKey = `{{project.plexxerAppId}}`. You have TWO distinct jobs with it,
-  at TWO different times. Be careful not to conflate them.
+  at TWO different times. Be careful not to conflate them.{{importedPlexxerNudge}}
 
   **AT BUILD TIME (now, in this subprocess)** — use the Plexxer CONTROL
   PLANE to define the schema and pull the generated client. The token is
@@ -225,12 +229,30 @@ What you should NOT do:
 """;
     }
 
-    public static string BuildUserPrompt(Project project, IReadOnlyList<ConversationTurn> scopeTurns, bool isIteration)
+    public enum BuildKind
+    {
+        FirstGreenfield,    // brand-new project, empty workspace
+        FirstImported,      // first build of an imported codebase (workspace has code we didn't write)
+        Iteration,          // any build after the first successful one
+    }
+
+    public static string BuildUserPrompt(Project project, IReadOnlyList<ConversationTurn> scopeTurns, BuildKind kind)
     {
         var sb = new StringBuilder();
-        sb.AppendLine(isIteration
-            ? "This is an UPDATE build. Modify the existing workspace to reflect the new scope turns."
-            : "This is the FIRST build. The workspace is (mostly) empty — create the initial code.");
+        switch (kind)
+        {
+            case BuildKind.FirstGreenfield:
+                sb.AppendLine("This is the FIRST build. The workspace is (mostly) empty — create the initial code.");
+                break;
+            case BuildKind.FirstImported:
+                sb.AppendLine("This is the FIRST build of an IMPORTED codebase. The workspace already contains code that you DID NOT author — it was cloned from a git remote. Read the existing files first to understand the structure, then apply the change request from the scope conversation. Do NOT scaffold a new project from scratch.");
+                if (!string.IsNullOrWhiteSpace(project.gitRemoteUrl))
+                    sb.AppendLine($"Remote: {project.gitRemoteUrl} (branch {project.gitRemoteBranch ?? "master"}).");
+                break;
+            case BuildKind.Iteration:
+                sb.AppendLine("This is an UPDATE build. Modify the existing workspace to reflect the new scope turns.");
+                break;
+        }
         sb.AppendLine();
         sb.AppendLine($"Project name: {project.name}");
         sb.AppendLine($"Pier app name (subdomain): {project.pierAppName}");

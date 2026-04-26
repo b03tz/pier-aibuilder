@@ -57,8 +57,28 @@ export interface ProjectDto {
   plexxerAppId: string
   scopeBrief: string
   workspaceStatus: string
+  isImported: boolean
   createdAt: string
   updatedAt: string
+}
+
+// Per-mode side-effect report from POST /api/projects. Only present when
+// the request opted into Import mode; describes how clone, env-var mirror,
+// and introspection went so the UI can warn on partial failure.
+export interface ImportReportDto {
+  mode: 'new' | 'import'
+  cloneOk: boolean | null
+  cloneError: string | null
+  envMirroredCount: number | null
+  envSkippedCount: number | null
+  envMirrorError: string | null
+  introspectionOk: boolean | null
+  introspectionError: string | null
+}
+
+export interface CreateProjectResponse {
+  project: ProjectDto
+  import: ImportReportDto | null
 }
 
 export interface TurnDto {
@@ -103,4 +123,27 @@ export interface DeployRunDto {
   deployNotes: string | null
   startedAt: string
   finishedAt: string | null
+}
+
+export interface VcsStateDto {
+  remoteUrl: string | null
+  branch: string | null
+  currentBranch: string | null
+  headSha: string | null
+  headShortSha: string | null
+  headSubject: string | null
+  headAt: string | null
+  lastPushSha: string | null
+  lastPushAt: string | null
+  isImported: boolean
+  workspaceHasGit: boolean
+}
+
+export interface CloneResponse {
+  ok: boolean
+  error: string | null
+  envMirroredCount: number | null
+  envMirrorError: string | null
+  introspectionOk: boolean | null
+  introspectionError: string | null
 }

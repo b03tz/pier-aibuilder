@@ -1,6 +1,8 @@
 using System.Text.RegularExpressions;
 using AiBuilder.Api.Projects.Build;
+using AiBuilder.Api.Projects.Import;
 using AiBuilder.Api.Projects.Scope;
+using AiBuilder.Api.Projects.Vcs;
 using Plexxer.Client.AiBuilder;
 
 namespace AiBuilder.Api.Projects;
@@ -17,7 +19,28 @@ public static class ProjectsEndpoints
         string PierApiToken,
         string? PlexxerAppId,
         string? PlexxerApiToken,
-        string ScopeBrief);
+        string ScopeBrief,
+        string? GitRemoteUrl,
+        string? GitRemoteBranch,
+        bool   IsImport);
+
+    public sealed record CreateResponse(
+        ProjectDto Project,
+        ImportReportDto? Import);
+
+    // Per-mode side-effect report. Surfaces clone outcome, env-var mirror
+    // outcome, and introspection outcome so the UI can show a meaningful
+    // message when one of the best-effort steps failed (e.g. clone failed
+    // because the SSH key isn't on the remote).
+    public sealed record ImportReportDto(
+        string Mode,                    // "new" | "import"
+        bool? CloneOk,
+        string? CloneError,
+        int?    EnvMirroredCount,
+        int?    EnvSkippedCount,
+        string? EnvMirrorError,
+        bool?   IntrospectionOk,
+        string? IntrospectionError);
 
     public sealed record UpdateRequest(
         string? Name,
@@ -30,7 +53,14 @@ public static class ProjectsEndpoints
     {
         var group = app.MapGroup("/api/projects").RequireAuthorization().WithTags("projects");
 
-        group.MapPost("", async (CreateRequest req, ProjectStore store, TokenVerifier verifier, CancellationToken ct) =>
+        group.MapPost("", async (
+            CreateRequest req,
+            ProjectStore store,
+            TokenVerifier verifier,
+            WorkspaceManager ws,
+            ImportPierEnvMirror envMirror,
+            ImportIntrospector introspector,
+            CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(req.Name))
                 return Results.BadRequest(new { error = "name-required" });
@@ -47,6 +77,25 @@ public static class ProjectsEndpoints
             if (hasPlexxerAppId != hasPlexxerToken)
                 return Results.BadRequest(new { error = "plexxer-both-or-neither",
                     message = "Plexxer app id and API token must be provided together, or both omitted." });
+
+            // Git remote URL: required for imports, optional for new
+            // projects. When provided, must pass the same strict validator
+            // we use for the VCS-tab Save action (no embedded credentials,
+            // no shell metacharacters, etc.).
+            string? normalizedRemoteUrl = null;
+            string? normalizedBranch    = null;
+            if (req.IsImport && string.IsNullOrWhiteSpace(req.GitRemoteUrl))
+                return Results.BadRequest(new { error = "git-remote-url-required-for-import" });
+            if (!string.IsNullOrWhiteSpace(req.GitRemoteUrl))
+            {
+                if (!GitRemoteUrl.TryNormalize(req.GitRemoteUrl, out var url, out var urlErr))
+                    return Results.BadRequest(new { error = "invalid-remote-url", reason = urlErr });
+                normalizedRemoteUrl = url;
+                var branchInput = string.IsNullOrWhiteSpace(req.GitRemoteBranch) ? "master" : req.GitRemoteBranch;
+                if (!GitRemoteUrl.TryNormalizeBranch(branchInput, out var branch, out var brErr))
+                    return Results.BadRequest(new { error = "invalid-branch", reason = brErr });
+                normalizedBranch = branch;
+            }
 
             if (await store.PierAppNameExistsAsync(req.PierAppName, ct))
                 return Results.Conflict(new { error = "pier-app-name-already-in-use" });
@@ -72,10 +121,39 @@ public static class ProjectsEndpoints
                 plexxerApiToken = hasPlexxerToken ? req.PlexxerApiToken    : null,
                 scopeBrief      = req.ScopeBrief,
                 workspaceStatus = WorkspaceStatus.Draft,
+                gitRemoteUrl    = normalizedRemoteUrl,
+                gitRemoteBranch = normalizedBranch,
+                isImported      = req.IsImport,
                 createdAt       = now,
                 updatedAt       = now,
             }, ct);
-            return Results.Created($"/api/projects/{created.Id}", ToDto(created));
+
+            // For imports: best-effort clone + env-var mirror + introspection.
+            // Failures don't roll back the project — the VCS tab can recover.
+            ImportReportDto? import = null;
+            if (req.IsImport)
+            {
+                var clone = await ws.CloneAsync(created.pierAppName, normalizedRemoteUrl!, normalizedBranch!, ct);
+                ImportPierEnvMirror.MirrorResult? mirror = null;
+                ImportIntrospector.IntrospectResult? intro = null;
+                if (clone.Ok)
+                {
+                    mirror = await envMirror.MirrorAsync(created.Id!, created.pierAppName, req.PierApiToken, ct);
+                    intro  = await introspector.RunAsync(created.Id!, created.pierAppName, ct);
+                }
+                import = new ImportReportDto(
+                    Mode:               "import",
+                    CloneOk:            clone.Ok,
+                    CloneError:         clone.Ok ? null : clone.ErrorMessage,
+                    EnvMirroredCount:   mirror?.Mirrored,
+                    EnvSkippedCount:    mirror?.SkippedRedacted,
+                    EnvMirrorError:     mirror?.Error,
+                    IntrospectionOk:    intro?.Ok,
+                    IntrospectionError: intro?.Error);
+            }
+
+            return Results.Created($"/api/projects/{created.Id}",
+                new CreateResponse(ToDto(created), import));
         });
 
         group.MapGet("", async (ProjectStore store, CancellationToken ct) =>
@@ -203,10 +281,11 @@ public static class ProjectsEndpoints
         string? PlexxerAppId,
         string ScopeBrief,
         string WorkspaceStatus,
+        bool IsImported,
         DateTime CreatedAt,
         DateTime UpdatedAt);
 
     public static ProjectDto ToDto(Project p) => new(
         p.Id!, p.name, p.pierAppName, p.plexxerAppId, p.scopeBrief,
-        p.workspaceStatus, p.createdAt, p.updatedAt);
+        p.workspaceStatus, p.isImported ?? false, p.createdAt, p.updatedAt);
 }

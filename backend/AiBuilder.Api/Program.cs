@@ -4,7 +4,9 @@ using AiBuilder.Api.Infrastructure;
 using AiBuilder.Api.Projects;
 using AiBuilder.Api.Projects.Build;
 using AiBuilder.Api.Projects.Deploy;
+using AiBuilder.Api.Projects.Import;
 using AiBuilder.Api.Projects.Scope;
+using AiBuilder.Api.Projects.Vcs;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http.Json;
@@ -37,11 +39,15 @@ builder.Services.AddSingleton<BuildRunStore>();
 builder.Services.AddSingleton<WorkspaceManager>();
 builder.Services.AddSingleton<BuildStreamHub>();
 builder.Services.AddSingleton<EnvManifestSeeder>();
+builder.Services.AddSingleton<ProjectLockManager>();
 builder.Services.AddSingleton<BuildOrchestrator>();
 builder.Services.AddSingleton<EnvVarStore>();
 builder.Services.AddSingleton<DeployRunStore>();
 builder.Services.AddSingleton<PublishRunner>();
 builder.Services.AddSingleton<DeployOrchestrator>();
+builder.Services.AddSingleton<PushOrchestrator>();
+builder.Services.AddSingleton<ImportPierEnvMirror>();
+builder.Services.AddSingleton<ImportIntrospector>();
 builder.Services.AddHttpClient();
 
 builder.Services.AddAuthentication(AuthEndpoints.CookieScheme)
@@ -112,6 +118,7 @@ app.MapScope();
 app.MapBuilds();
 app.MapWorkspace();
 app.MapDeploy();
+app.MapVcs();
 
 // Static frontend (Vue/Vite build output). Served at the app root.
 var frontendDist = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "frontend", "dist"));

@@ -68,6 +68,7 @@
         <v-tab value="scope">Scope</v-tab>
         <v-tab value="build">Build</v-tab>
         <v-tab value="files">Files</v-tab>
+        <v-tab value="vcs">Version Control</v-tab>
         <v-tab value="deploy">Deploy</v-tab>
       </v-tabs>
 
@@ -75,6 +76,7 @@
         <v-window-item value="scope"><ScopeTab :project="project" @changed="reload" /></v-window-item>
         <v-window-item value="build"><BuildTab :project="project" @changed="reload" /></v-window-item>
         <v-window-item value="files"><FilesTab :project="project" /></v-window-item>
+        <v-window-item value="vcs"><VersionControlTab :project="project" /></v-window-item>
         <v-window-item value="deploy"><DeployTab :project="project" @changed="reload" /></v-window-item>
       </v-window>
     </template>
@@ -87,6 +89,7 @@ import { api, type ProjectDto } from '../api/client'
 import ScopeTab from '../components/ScopeTab.vue'
 import BuildTab from '../components/BuildTab.vue'
 import FilesTab from '../components/FilesTab.vue'
+import VersionControlTab from '../components/VersionControlTab.vue'
 import DeployTab from '../components/DeployTab.vue'
 
 const props = defineProps<{ id: string }>()
