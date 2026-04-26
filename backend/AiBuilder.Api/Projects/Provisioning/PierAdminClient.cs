@@ -89,8 +89,7 @@ public sealed class PierAdminClient
         EnsureConfigured();
         var http = _http.CreateClient();
         using var msg = new HttpRequestMessage(HttpMethod.Get, _env.PierAdminBase + $"/admin-api/apps/{Uri.EscapeDataString(name)}");
-        msg.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _env.PierAdminToken!);
-        msg.Headers.Add("X-Pier-Originator", originator);
+        ApplyAuthAndOriginator(msg, originator);
 
         HttpResponseMessage resp;
         try { resp = await http.SendAsync(msg, ct); }
@@ -133,8 +132,7 @@ public sealed class PierAdminClient
                 apiSubdomain   = req.ApiSubdomain,
             }, options: Json),
         };
-        msg.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _env.PierAdminToken!);
-        msg.Headers.Add("X-Pier-Originator", originator);
+        ApplyAuthAndOriginator(msg, originator);
 
         HttpResponseMessage resp;
         try
@@ -193,6 +191,19 @@ public sealed class PierAdminClient
         _log.LogWarning("Pier admin-API create-app failed: status={Status} code={Code} originator={Originator}",
             status, code, originator);
         throw new PierAdminError(code, status, detail);
+    }
+
+    // Pier's admin-API is gated by an ASP.NET `RequireHost` filter on
+    // `admin.<parent-domain>`. When AiBuilder calls Pier over loopback
+    // the URL host is `127.0.0.1:<port>`, which fails RequireHost and
+    // returns 404 — so we override the Host header here. The override
+    // also harmlessly matches in dev where the URL host is already
+    // `admin.<parent-domain>`.
+    private void ApplyAuthAndOriginator(HttpRequestMessage msg, string originator)
+    {
+        msg.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _env.PierAdminToken!);
+        msg.Headers.Add("X-Pier-Originator", originator);
+        msg.Headers.Host = _env.PierAdminHost;
     }
 
     private void EnsureConfigured()

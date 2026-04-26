@@ -8,6 +8,7 @@ public sealed record PierEnv(
     string? FrontendOrigin,
     string? PierAdminToken,
     string PierAdminBase,
+    string PierAdminHost,
     bool Prod)
 {
     // Whether the "Create project on Pier" auto-bootstrap feature is
@@ -52,15 +53,22 @@ public sealed record PierEnv(
             // from api-<app>.onpier.tech and the frontend from <app>.onpier.tech
             // so CORS must allow that origin with credentials.
             FrontendOrigin:  Environment.GetEnvironmentVariable("FRONTEND_ORIGIN"),
-            // Pier admin-API integration. Both optional — when absent, the
-            // "Create project on Pier" feature stays disabled instead of
-            // throwing on boot, so an AiBuilder host that doesn't have an
-            // admin token can still run (just without auto-create). The
-            // base URL must be loopback in prod (Pier's origin gate);
-            // dev-on-allowlisted-IP can override to https://admin.<host>.
+            // Pier admin-API integration. Token is the only gate for the
+            // feature — when absent, "Create project on Pier" stays
+            // disabled but the rest of AiBuilder still boots cleanly.
+            //
+            // Two URL knobs because Pier's admin-API surface is gated by
+            // a host-header match (`RequireHost("admin.onpier.tech")`):
+            //   PierAdminBase — what we actually connect to (loopback in
+            //                   prod, public URL on dev-with-allowlist).
+            //   PierAdminHost — the Host header we send. Has to match
+            //                   Pier's RequireHost regardless of what URL
+            //                   we hit, otherwise we get 404 from
+            //                   ASP.NET's routing layer.
             PierAdminToken:  Environment.GetEnvironmentVariable("PIER_ADMIN_TOKEN"),
             PierAdminBase:   (Environment.GetEnvironmentVariable("PIER_ADMIN_BASE") ?? "http://127.0.0.1:8080")
                                 .TrimEnd('/'),
+            PierAdminHost:   Environment.GetEnvironmentVariable("PIER_ADMIN_HOST") ?? "admin.onpier.tech",
             Prod:            !string.Equals(aspEnv, "Development", StringComparison.OrdinalIgnoreCase));
     }
 }
