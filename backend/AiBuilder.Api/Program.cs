@@ -50,6 +50,7 @@ builder.Services.AddSingleton<PushOrchestrator>();
 builder.Services.AddSingleton<ImportPierEnvMirror>();
 builder.Services.AddSingleton<ImportIntrospector>();
 builder.Services.AddSingleton<PierAdminClient>();
+builder.Services.AddSingleton<PlexxerSchemaWiper>();
 builder.Services.AddHttpClient();
 
 builder.Services.AddAuthentication(AuthEndpoints.CookieScheme)

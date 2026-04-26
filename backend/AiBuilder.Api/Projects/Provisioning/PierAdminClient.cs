@@ -79,6 +79,45 @@ public sealed class PierAdminClient
         }
     }
 
+    // Deletes a Pier app via the admin-API. Idempotent — a 404 is
+    // treated as "already gone, OK" so the caller can retry partial-
+    // failure cleanups without the second pass exploding.
+    public async Task DeleteAppAsync(string name, string originator, CancellationToken ct)
+    {
+        EnsureConfigured();
+        var http = _http.CreateClient();
+        using var msg = new HttpRequestMessage(HttpMethod.Delete,
+            _env.PierAdminBase + $"/admin-api/apps/{Uri.EscapeDataString(name)}");
+        ApplyAuthAndOriginator(msg, originator);
+
+        HttpResponseMessage resp;
+        try { resp = await http.SendAsync(msg, ct); }
+        catch (Exception e)
+        {
+            _log.LogWarning(e, "Pier admin-API delete-app transport failure (originator={Originator})", originator);
+            throw new PierAdminError("pier-admin-unreachable", 0, e.Message);
+        }
+        using var _ = resp;
+        var status = (int)resp.StatusCode;
+        if (status is 200 or 204 or 404) return;
+
+        string? detail = null;
+        try { detail = await resp.Content.ReadAsStringAsync(ct); } catch { /* tolerate */ }
+        detail = TruncateDetail(detail);
+
+        var code = status switch
+        {
+            401 => "pier-admin-token-invalid",
+            403 => "pier-admin-origin-rejected",
+            429 => "pier-admin-rate-limited",
+            >= 500 and < 600 => "pier-admin-server-error",
+            _   => "pier-admin-unexpected",
+        };
+        _log.LogWarning("Pier admin-API delete-app failed: status={Status} code={Code} originator={Originator}",
+            status, code, originator);
+        throw new PierAdminError(code, status, detail);
+    }
+
     // Best-effort existence check used by the slug-collision pre-flight.
     // Returns true if Pier already owns the name, false if it doesn't, and
     // throws PierAdminError for anything that isn't a clean 200/404 — we

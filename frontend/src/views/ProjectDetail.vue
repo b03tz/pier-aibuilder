@@ -34,9 +34,24 @@
               subtitle="Wipe history, turns, runs, env, files"
               @click="showReset = true"
             />
+            <v-list-item
+              prepend-icon="mdi-delete-forever"
+              title="Delete project…"
+              subtitle="Forever — Pier app + AiBuilder record + (optionally) Plexxer schemas"
+              base-color="error"
+              @click="openDelete"
+            />
           </v-list>
         </v-menu>
       </div>
+
+      <DeleteProjectDialog
+        v-if="project"
+        v-model="showDelete"
+        :project="project"
+        :pier-admin-configured="pierAdminConfigured"
+        @deleted="onDeleted"
+      />
 
       <v-dialog v-model="showReset" max-width="520">
         <v-card class="pa-5">
@@ -96,14 +111,17 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { api, type ProjectDto } from '../api/client'
+import { useRouter } from 'vue-router'
+import { api, type PierAdminStatusDto, type ProjectDto } from '../api/client'
 import ScopeTab from '../components/ScopeTab.vue'
 import BuildTab from '../components/BuildTab.vue'
 import FilesTab from '../components/FilesTab.vue'
 import VersionControlTab from '../components/VersionControlTab.vue'
 import DeployTab from '../components/DeployTab.vue'
+import DeleteProjectDialog from '../components/DeleteProjectDialog.vue'
 
 const props = defineProps<{ id: string }>()
+const router = useRouter()
 const project = ref<ProjectDto | null>(null)
 const loading = ref(true)
 const tab = ref('scope')
@@ -112,6 +130,26 @@ const showReset = ref(false)
 const confirmInput = ref('')
 const resetting = ref(false)
 const resetError = ref<string | null>(null)
+
+const showDelete = ref(false)
+const pierAdminConfigured = ref(false)
+
+async function openDelete() {
+  // Pull the admin-status fresh so the dialog renders the right
+  // default-state for the "Delete the Pier app" checkbox.
+  try {
+    const s = await api.get<PierAdminStatusDto>('/api/_pier-admin/status')
+    pierAdminConfigured.value = s.configured
+  } catch {
+    pierAdminConfigured.value = false
+  }
+  showDelete.value = true
+}
+
+function onDeleted() {
+  showDelete.value = false
+  router.push({ name: 'projects' })
+}
 
 async function reload() {
   project.value = await api.get<ProjectDto>(`/api/projects/${props.id}`)

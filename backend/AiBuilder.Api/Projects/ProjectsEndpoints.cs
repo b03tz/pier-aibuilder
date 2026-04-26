@@ -277,6 +277,140 @@ public static class ProjectsEndpoints
             return Results.Ok(new { status = "ok", workspaceStatus = WorkspaceStatus.Draft });
         });
 
+        // ----------------------------------------------------------------
+        // Hard delete. Wipes the project from every system the admin opted
+        // into in the dialog, then removes the AiBuilder record itself.
+        // External-system actions run first so a partial failure (Pier
+        // unreachable, Plexxer 403, etc.) leaves the AiBuilder record
+        // intact and the admin can retry the same call.
+        //
+        // The `confirm` query param must be the literal string
+        // "delete <pierAppName>" — both the verb and the name. Reset
+        // already protects against single-name typos; delete bumps the
+        // bar a notch higher because it's irreversible.
+        // ----------------------------------------------------------------
+        group.MapDelete("/{id}", async (
+            string id,
+            string? confirm,
+            bool? deletePierApp,
+            bool? deletePlexxerSchemas,
+            ProjectStore projects,
+            ConversationStore turns,
+            PlexxerClient plexxer,
+            WorkspaceManager ws,
+            PierAdminClient pierAdmin,
+            PlexxerSchemaWiper schemaWiper,
+            ILogger<Marker> log,
+            CancellationToken ct) =>
+        {
+            var project = await projects.GetWithSecretsAsync(id, ct);
+            if (project is null) return Results.NotFound();
+
+            // Confirm phrase: literal "delete <pierAppName>" — case-sensitive.
+            // Catches both "I clicked the wrong row" and "I forgot which
+            // app I was looking at" because the admin must type both the
+            // verb and the name.
+            var expectedPhrase = $"delete {project.pierAppName}";
+            if (!string.Equals(confirm, expectedPhrase, StringComparison.Ordinal))
+                return Results.BadRequest(new
+                {
+                    error = "confirm-required",
+                    message = $"Pass ?confirm={Uri.EscapeDataString(expectedPhrase)} to delete this project.",
+                });
+
+            var doPier    = deletePierApp        ?? false;
+            var doPlexxer = deletePlexxerSchemas ?? false;
+
+            // Per-step report so the UI can show "Pier app deleted, 3 Plexxer
+            // schemas wiped, AiBuilder record removed". Each step appends.
+            var pierResult    = "skipped";
+            var plexxerResult = "skipped";
+
+            // ---- 1. Delete Pier app (admin-API). Fail-fast. ----
+            if (doPier)
+            {
+                if (!pierAdmin.Configured)
+                    return Results.BadRequest(new
+                    {
+                        error = "pier-admin-not-configured",
+                        message = "Pier admin token is not set on this AiBuilder host; un-tick 'Delete the Pier app' or configure PIER_ADMIN_TOKEN first."
+                    });
+                try
+                {
+                    await pierAdmin.DeleteAppAsync(project.pierAppName, $"aibuilder/{project.pierAppName}", ct);
+                    pierResult = "deleted";
+                }
+                catch (PierAdminClient.PierAdminError e)
+                {
+                    log.LogWarning("Delete project: Pier admin DELETE failed for {App}: {Code}", project.pierAppName, e.Code);
+                    return MapAdminErrorToResponse(e);
+                }
+            }
+
+            // ---- 2. Wipe Plexxer schemas. Fail-fast on permission errors. ----
+            if (doPlexxer)
+            {
+                if (string.IsNullOrWhiteSpace(project.plexxerAppId) || string.IsNullOrWhiteSpace(project.plexxerApiToken))
+                    return Results.BadRequest(new
+                    {
+                        error = "plexxer-not-configured",
+                        message = "This project has no Plexxer credentials; un-tick 'Wipe the Plexxer schemas' to proceed."
+                    });
+                try
+                {
+                    var wipe = await schemaWiper.WipeAsync(project.plexxerAppId!, project.plexxerApiToken!, ct);
+                    plexxerResult = $"wiped {wipe.Deleted} schema(s); {wipe.SkippedAlreadyGone.Count} already gone";
+                }
+                catch (PlexxerSchemaWiper.PlexxerSchemaWipeError e)
+                {
+                    log.LogWarning("Delete project: Plexxer schema wipe failed for {AppKey} entity={Entity}: {Code}",
+                        project.plexxerAppId, e.Entity, e.Code);
+                    return Results.Problem(
+                        title: e.Code,
+                        detail: e.Entity is null
+                            ? $"Plexxer schema wipe failed (HTTP {e.Status}): {e.Detail}"
+                            : $"Plexxer schema wipe failed on entity '{e.Entity}' (HTTP {e.Status}): {e.Detail}",
+                        statusCode: e.Code is "plexxer-permission-denied" or "plexxer-token-invalid" ? 400 : 502);
+                }
+            }
+
+            // ---- 3. Delete child Plexxer rows in AiBuilder's own store. ----
+            // Children before parent so a transient failure doesn't orphan
+            // them under a missing Project.
+            await plexxer.DeleteAsync<TargetEnvVar>     (new Dictionary<string, object?> { ["project:eq"] = id }, ct);
+            await plexxer.DeleteAsync<DeployRun>        (new Dictionary<string, object?> { ["project:eq"] = id }, ct);
+            await plexxer.DeleteAsync<BuildRun>         (new Dictionary<string, object?> { ["project:eq"] = id }, ct);
+            await plexxer.DeleteAsync<ConversationTurn> (new Dictionary<string, object?> { ["project:eq"] = id }, ct);
+
+            // ---- 4. Wipe the on-disk workspace. ----
+            string? workspaceWarning = null;
+            try
+            {
+                var workspace = ws.ResolvePath(project.pierAppName);
+                if (Directory.Exists(workspace))
+                    Directory.Delete(workspace, recursive: true);
+            }
+            catch (Exception e)
+            {
+                // Same posture as Reset: workspace wipe is best-effort.
+                // The admin can rm -rf the dir manually if a file lock
+                // briefly prevents the recursive delete.
+                workspaceWarning = e.Message;
+            }
+
+            // ---- 5. Delete the AiBuilder Project record itself. ----
+            await projects.DeleteAsync(id, ct);
+
+            return Results.Ok(new
+            {
+                status         = "ok",
+                pier           = pierResult,
+                plexxer        = plexxerResult,
+                workspace      = workspaceWarning is null ? "wiped" : $"warning: {workspaceWarning}",
+                projectRecord  = "deleted",
+            });
+        });
+
         group.MapPatch("/{id}", async (string id, UpdateRequest req, ProjectStore store, TokenVerifier verifier, CancellationToken ct) =>
         {
             var existing = await store.GetWithSecretsAsync(id, ct);
