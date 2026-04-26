@@ -12,6 +12,17 @@
         <v-chip :color="statusColor(project.workspaceStatus)" variant="tonal" class="mr-2">
           {{ project.workspaceStatus }}
         </v-chip>
+        <v-btn
+          :href="pierManageUrl"
+          target="_blank"
+          rel="noopener"
+          variant="text"
+          size="small"
+          prepend-icon="mdi-open-in-new"
+          class="mr-1"
+        >
+          Manage in Pier
+        </v-btn>
         <v-menu>
           <template #activator="{ props: menuProps }">
             <v-btn v-bind="menuProps" icon="mdi-dots-vertical" size="small" variant="text" />
@@ -84,7 +95,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api, type ProjectDto } from '../api/client'
 import ScopeTab from '../components/ScopeTab.vue'
 import BuildTab from '../components/BuildTab.vue'
@@ -126,6 +137,14 @@ async function onReset() {
     resetting.value = false
   }
 }
+
+// Direct deep-link into Pier's admin UI for the project's app. Works for
+// both auto-created and manually-bound projects since the URL is a
+// function of the pierAppName alone.
+const pierManageUrl = computed(() =>
+  project.value
+    ? `https://admin.onpier.tech/Apps/Detail/${encodeURIComponent(project.value.pierAppName)}`
+    : '#')
 
 function statusColor(s: string) {
   if (s.startsWith('Done')) return 'success'

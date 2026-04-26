@@ -1,6 +1,9 @@
 using System.Text.RegularExpressions;
+using AiBuilder.Api.Config;
 using AiBuilder.Api.Projects.Build;
+using AiBuilder.Api.Projects.Deploy;
 using AiBuilder.Api.Projects.Import;
+using AiBuilder.Api.Projects.Provisioning;
 using AiBuilder.Api.Projects.Scope;
 using AiBuilder.Api.Projects.Vcs;
 using Plexxer.Client.AiBuilder;
@@ -9,24 +12,29 @@ namespace AiBuilder.Api.Projects;
 
 public static class ProjectsEndpoints
 {
-    // Must match Pier's subdomain regex. Rejects path traversal, uppercase,
-    // leading dash. Same regex is used before any path interpolation on disk.
-    public static readonly Regex PierAppNameRegex = new("^[a-z][a-z0-9-]{0,39}$", RegexOptions.Compiled);
+    // Must match Pier's subdomain regex (`^[a-z][a-z0-9-]{1,30}$`, total
+    // length 2..31). Rejects path traversal, uppercase, leading dash, and
+    // anything Pier itself would 400 on. Same regex is used before any
+    // path interpolation on disk.
+    public static readonly Regex PierAppNameRegex = new("^[a-z][a-z0-9-]{1,30}$", RegexOptions.Compiled);
 
     public sealed record CreateRequest(
         string Name,
-        string PierAppName,
-        string PierApiToken,
+        string? PierAppName,        // optional when AutoCreateOnPier=true (we derive a slug)
+        string? PierApiToken,       // required only on the manual + import paths
         string? PlexxerAppId,
         string? PlexxerApiToken,
         string ScopeBrief,
         string? GitRemoteUrl,
         string? GitRemoteBranch,
-        bool   IsImport);
+        bool   IsImport,
+        bool?  AutoCreateOnPier,    // null defaults to true on new projects (when admin configured)
+        bool?  HasFrontend);        // null defaults to true; only honoured on auto-create
 
     public sealed record CreateResponse(
         ProjectDto Project,
-        ImportReportDto? Import);
+        ImportReportDto?     Import,
+        ProvisioningReportDto? Provisioning);
 
     // Per-mode side-effect report. Surfaces clone outcome, env-var mirror
     // outcome, and introspection outcome so the UI can show a meaningful
@@ -41,6 +49,17 @@ public static class ProjectsEndpoints
         string? EnvMirrorError,
         bool?   IntrospectionOk,
         string? IntrospectionError);
+
+    // Surfaced only on the auto-create branch. Reports what got created
+    // on Pier and how the post-create env-seed call went; lets the UI
+    // show "Created Pier app `foo`" + a green/yellow indicator.
+    public sealed record ProvisioningReportDto(
+        string  PierAppName,
+        string  ApiBaseUrl,
+        string  ApiDomain,
+        string? FrontendDomain,
+        bool    EnvSeedOk,
+        string? EnvSeedError);
 
     public sealed record UpdateRequest(
         string? Name,
@@ -60,14 +79,16 @@ public static class ProjectsEndpoints
             WorkspaceManager ws,
             ImportPierEnvMirror envMirror,
             ImportIntrospector introspector,
+            PierAdminClient pierAdmin,
+            PierEnv pierEnv,
+            IHttpClientFactory httpFactory,
+            ILogger<Marker> log,
             CancellationToken ct) =>
         {
+            // ---- Field validation that applies to every flow ----------------
             if (string.IsNullOrWhiteSpace(req.Name))
                 return Results.BadRequest(new { error = "name-required" });
-            if (!PierAppNameRegex.IsMatch(req.PierAppName))
-                return Results.BadRequest(new { error = "pier-app-name-invalid",
-                    message = "Must match ^[a-z][a-z0-9-]{0,39}$" });
-            if (string.IsNullOrWhiteSpace(req.PierApiToken) || string.IsNullOrWhiteSpace(req.ScopeBrief))
+            if (string.IsNullOrWhiteSpace(req.ScopeBrief))
                 return Results.BadRequest(new { error = "required-fields-missing" });
 
             // Plexxer creds are optional overall, but must be provided as a
@@ -97,6 +118,44 @@ public static class ProjectsEndpoints
                 normalizedBranch = branch;
             }
 
+            // ---- Branch selection ------------------------------------------
+            // Auto-create only applies to new projects (not imports) and only
+            // when the host is configured for it. The flag defaults true on
+            // new projects so the friction-free path is the default.
+            var autoCreate = !req.IsImport
+                          && pierAdmin.Configured
+                          && (req.AutoCreateOnPier ?? true);
+
+            // Plexxer creds (when present) are verified once up-front so we
+            // fail fast before touching Pier. Same shape on every branch.
+            if (hasPlexxerAppId)
+            {
+                var plex = await verifier.VerifyPlexxerAsync(req.PlexxerAppId!, req.PlexxerApiToken!, ct);
+                if (!plex.Ok)
+                    return Results.BadRequest(new { error = "plexxer-token-rejected", message = plex.Message });
+            }
+
+            if (autoCreate)
+            {
+                return await CreateWithPierAutoBootstrapAsync(
+                    req, store, pierAdmin, pierEnv, httpFactory, log,
+                    hasPlexxerAppId, hasPlexxerToken,
+                    normalizedRemoteUrl, normalizedBranch,
+                    ct);
+            }
+
+            // ---- Manual / import flow (existing behaviour) ------------------
+            // pierAppName + pierApiToken are required: either the user
+            // provided them at creation time, or it's an import that points
+            // at an existing Pier app.
+            if (string.IsNullOrWhiteSpace(req.PierAppName))
+                return Results.BadRequest(new { error = "pier-app-name-required" });
+            if (!PierAppNameRegex.IsMatch(req.PierAppName))
+                return Results.BadRequest(new { error = "pier-app-name-invalid",
+                    message = "Must match ^[a-z][a-z0-9-]{1,30}$ (2..31 lowercase chars, digits or hyphens, starting with a letter)" });
+            if (string.IsNullOrWhiteSpace(req.PierApiToken))
+                return Results.BadRequest(new { error = "pier-token-required" });
+
             if (await store.PierAppNameExistsAsync(req.PierAppName, ct))
                 return Results.Conflict(new { error = "pier-app-name-already-in-use" });
 
@@ -104,12 +163,6 @@ public static class ProjectsEndpoints
             var pier = await verifier.VerifyPierAsync(req.PierAppName, req.PierApiToken, ct);
             if (!pier.Ok)
                 return Results.BadRequest(new { error = "pier-token-rejected", message = pier.Message });
-            if (hasPlexxerAppId)
-            {
-                var plex = await verifier.VerifyPlexxerAsync(req.PlexxerAppId!, req.PlexxerApiToken!, ct);
-                if (!plex.Ok)
-                    return Results.BadRequest(new { error = "plexxer-token-rejected", message = plex.Message });
-            }
 
             var now = DateTime.UtcNow;
             var created = await store.CreateAsync(new Project
@@ -138,7 +191,7 @@ public static class ProjectsEndpoints
                 ImportIntrospector.IntrospectResult? intro = null;
                 if (clone.Ok)
                 {
-                    mirror = await envMirror.MirrorAsync(created.Id!, created.pierAppName, req.PierApiToken, ct);
+                    mirror = await envMirror.MirrorAsync(created.Id!, created.pierAppName, req.PierApiToken!, ct);
                     intro  = await introspector.RunAsync(created.Id!, created.pierAppName, ct);
                 }
                 import = new ImportReportDto(
@@ -153,7 +206,7 @@ public static class ProjectsEndpoints
             }
 
             return Results.Created($"/api/projects/{created.Id}",
-                new CreateResponse(ToDto(created), import));
+                new CreateResponse(ToDto(created), import, null));
         });
 
         group.MapGet("", async (ProjectStore store, CancellationToken ct) =>
@@ -268,6 +321,249 @@ public static class ProjectsEndpoints
             return Results.Ok(ToDto(after ?? existing));
         });
     }
+
+    // Marker type so we can request a categorised ILogger without
+    // declaring a static class as the category. Keeps log lines neatly
+    // tagged "AiBuilder.Api.Projects.ProjectsEndpoints" instead of a
+    // generic "Default".
+    public sealed class Marker { }
+
+    // Auto-create branch — derives a Pier-valid slug from the project
+    // name, reserves it on Pier via the admin-API, and persists the
+    // resulting Project record. Designed to leave the system tidy on
+    // every failure path:
+    //
+    //   * If we can't find a free slug after 5 attempts, nothing is
+    //     created and the user gets a clear conflict error.
+    //   * If the Pier admin-API call fails, no Pier app exists (Pier
+    //     either rejected the request or never received it) and we
+    //     never created our Plexxer Project, so there's nothing to
+    //     clean up.
+    //   * If the post-create env-var seed fails, the Pier app + our
+    //     Project record are both healthy — we surface a warning in
+    //     the response but don't roll back; the user can re-seed via
+    //     the Deploy tab manually.
+    private static async Task<IResult> CreateWithPierAutoBootstrapAsync(
+        CreateRequest req,
+        ProjectStore store,
+        PierAdminClient pierAdmin,
+        PierEnv pierEnv,
+        IHttpClientFactory httpFactory,
+        ILogger<Marker> log,
+        bool hasPlexxerAppId,
+        bool hasPlexxerToken,
+        string? normalizedRemoteUrl,
+        string? normalizedBranch,
+        CancellationToken ct)
+    {
+        var hasFrontend = req.HasFrontend ?? true;
+
+        // The user can supply their own slug as an override (free-form
+        // text in the form's "advanced" section). When they don't, derive
+        // one from the project name.
+        string baseSlug;
+        if (!string.IsNullOrWhiteSpace(req.PierAppName))
+        {
+            // The override must already be Pier-valid; we don't try to
+            // re-normalise it because that would silently rewrite the
+            // user's intent. Reject loudly instead.
+            if (!PierAppNameRegex.IsMatch(req.PierAppName))
+                return Results.BadRequest(new { error = "pier-app-name-invalid",
+                    message = "Override must match ^[a-z][a-z0-9-]{1,30}$" });
+            baseSlug = req.PierAppName.Trim();
+        }
+        else
+        {
+            try { baseSlug = PierAppSlug.Derive(req.Name); }
+            catch (Exception e)
+            {
+                log.LogWarning(e, "PierAppSlug.Derive threw on input '{Name}'", req.Name);
+                return Results.BadRequest(new { error = "pier-app-slug-derivation-failed",
+                    message = "Could not derive a valid Pier app name from the project name." });
+            }
+        }
+
+        const int maxAttempts = 5;
+        var originator = $"aibuilder/{baseSlug}";
+
+        // Find the first slug that's free both locally and on Pier. Both
+        // sides because (a) Pier may already own a name we don't track and
+        // (b) we don't want two Plexxer Projects sharing a pierAppName.
+        string? slug = null;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            string candidate;
+            try
+            {
+                candidate = attempt == 1 ? baseSlug : PierAppSlug.WithCollisionSuffix(baseSlug, attempt);
+            }
+            catch (Exception e)
+            {
+                log.LogWarning(e, "Could not generate slug suffix for base '{Base}' attempt {Attempt}", baseSlug, attempt);
+                break;
+            }
+
+            if (await store.PierAppNameExistsAsync(candidate, ct))
+                continue;
+
+            try
+            {
+                if (await pierAdmin.AppExistsAsync(candidate, originator, ct))
+                    continue;
+            }
+            catch (PierAdminClient.PierAdminError e)
+            {
+                // Surface admin-API errors immediately — a 401/403/500 here
+                // means the create call would also fail, and we'd rather
+                // tell the user "your admin token is invalid" than silently
+                // race past it.
+                return MapAdminErrorToResponse(e);
+            }
+
+            slug = candidate;
+            break;
+        }
+        if (slug is null)
+            return Results.Conflict(new { error = "pier-app-slug-no-free-name",
+                message = $"Could not find an unused Pier app name after {maxAttempts} attempts. Try a different project name or set an explicit override." });
+
+        // ---- Reserve on Pier (the only step that could leave external state) ----
+        PierAdminClient.BootstrapResult result;
+        try
+        {
+            result = await pierAdmin.CreateAppAsync(
+                new PierAdminClient.CreateAppRequest(
+                    Name:         slug,
+                    HasFrontend:  hasFrontend,
+                    Category:     "AiBuilder",
+                    MintApiToken: true),
+                originator,
+                ct);
+        }
+        catch (PierAdminClient.PierAdminError e)
+        {
+            // No Pier app exists at this point (Pier either rejected with
+            // a 4xx pre-create or the network call never landed). Nothing
+            // to roll back.
+            return MapAdminErrorToResponse(e);
+        }
+
+        // ---- Persist our Plexxer Project with the minted token ----
+        Project created;
+        try
+        {
+            var now = DateTime.UtcNow;
+            created = await store.CreateAsync(new Project
+            {
+                name            = req.Name.Trim(),
+                pierAppName     = result.AppName,
+                pierApiToken    = result.ApiToken,
+                plexxerAppId    = hasPlexxerAppId ? req.PlexxerAppId!.Trim() : null,
+                plexxerApiToken = hasPlexxerToken ? req.PlexxerApiToken    : null,
+                scopeBrief      = req.ScopeBrief,
+                workspaceStatus = WorkspaceStatus.Draft,
+                gitRemoteUrl    = normalizedRemoteUrl,
+                gitRemoteBranch = normalizedBranch,
+                isImported      = false,
+                createdAt       = now,
+                updatedAt       = now,
+            }, ct);
+        }
+        catch (Exception e)
+        {
+            // We have a Pier app but no Plexxer record. Leaving an orphan
+            // is worse than a noisy error, but admin DELETE is out of
+            // scope for v1 — log loudly and surface a clear message. The
+            // user can clean up via Pier's UI; once `/admin-api/apps/{x}
+            // DELETE` is allowed for AiBuilder we'll close this gap.
+            log.LogError(e,
+                "Plexxer Project create failed AFTER Pier admin-API created app '{Slug}'. " +
+                "Pier app is orphaned and must be deleted manually via Pier's UI.",
+                result.AppName);
+            return Results.Problem(
+                title: "pier-app-orphaned",
+                detail: $"Pier app '{result.AppName}' was created, but persisting the AiBuilder project failed. " +
+                        $"Delete '{result.AppName}' in Pier's admin UI to retry, then try again.",
+                statusCode: 500);
+        }
+
+        // ---- Best-effort post-create env seed (PIER_API_TOKEN, PIER_API_BASE) ----
+        // Per the spec these live as env vars on the new Pier app so the
+        // running app can call its own /api/{name}/* surface if it ever
+        // needs to. They use the per-app token, not the admin token.
+        // Defer the restart per the locked decisions — first /deploy will
+        // restart organically.
+        var (envOk, envErr) = await SeedNewAppEnvAsync(httpFactory, result, log, ct);
+
+        var dto = ToDto(created);
+        var report = new ProvisioningReportDto(
+            PierAppName:    result.AppName,
+            ApiBaseUrl:     result.ApiBaseUrl,
+            ApiDomain:      result.ApiDomain,
+            FrontendDomain: result.FrontendDomain,
+            EnvSeedOk:      envOk,
+            EnvSeedError:   envErr);
+
+        return Results.Created($"/api/projects/{created.Id}",
+            new CreateResponse(dto, null, report));
+    }
+
+    private static async Task<(bool ok, string? error)> SeedNewAppEnvAsync(
+        IHttpClientFactory httpFactory,
+        PierAdminClient.BootstrapResult result,
+        ILogger log,
+        CancellationToken ct)
+    {
+        try
+        {
+            var pier = new PierClient(httpFactory.CreateClient(), result.AppName, result.ApiToken);
+            // PIER_API_TOKEN is a secret (it's the live deploy token);
+            // PIER_API_BASE is plain config. Neither is exposeToFrontend.
+            var t = await pier.PutEnvAsync("PIER_API_TOKEN",
+                new PierClient.PutEnvBody(result.ApiToken, isSecret: true,  exposeToFrontend: false), ct);
+            if (!t.IsSuccessStatusCode)
+                return (false, $"PIER_API_TOKEN PUT returned {(int)t.StatusCode}");
+            var b = await pier.PutEnvAsync("PIER_API_BASE",
+                new PierClient.PutEnvBody(result.ApiBaseUrl, isSecret: false, exposeToFrontend: false), ct);
+            if (!b.IsSuccessStatusCode)
+                return (false, $"PIER_API_BASE PUT returned {(int)b.StatusCode}");
+            return (true, null);
+        }
+        catch (Exception e)
+        {
+            log.LogWarning(e, "Post-create env seed failed for new Pier app {Name}", result.AppName);
+            return (false, e.Message);
+        }
+    }
+
+    // Stable mapping from PierAdminClient.PierAdminError to a controller
+    // response. Never includes the admin token or the request body —
+    // only the structured code + a short, scrubbed detail.
+    private static IResult MapAdminErrorToResponse(PierAdminClient.PierAdminError e) => e.Code switch
+    {
+        "pier-admin-not-configured" =>
+            Results.Problem(title: e.Code,
+                detail: "PIER_ADMIN_TOKEN is not set on this AiBuilder host; configure it in Pier env vars to enable auto-create.",
+                statusCode: 503),
+        "pier-admin-token-invalid" =>
+            Results.Problem(title: e.Code,
+                detail: "Pier rejected the admin token. Regenerate it in Pier's Settings page and update PIER_ADMIN_TOKEN.",
+                statusCode: 502),
+        "pier-admin-origin-rejected" =>
+            Results.Problem(title: e.Code,
+                detail: "Pier rejected the origin. AiBuilder must reach Pier over loopback (or from an allowlisted IP). Check PIER_ADMIN_BASE.",
+                statusCode: 502),
+        "pier-admin-name-conflict" =>
+            Results.Conflict(new { error = e.Code, message = "Pier reports the requested name is already taken." }),
+        "pier-validation-failed" =>
+            Results.BadRequest(new { error = e.Code, message = e.Detail }),
+        "pier-admin-rate-limited" =>
+            Results.Problem(title: e.Code, detail: "Pier admin-API rate limit reached; try again shortly.", statusCode: 503),
+        "pier-admin-unreachable" =>
+            Results.Problem(title: e.Code, detail: "Pier admin-API is unreachable from this host. Verify PIER_ADMIN_BASE and network.", statusCode: 502),
+        _ =>
+            Results.Problem(title: e.Code, detail: $"Unexpected admin-API failure (HTTP {e.Status}).", statusCode: 502),
+    };
 
     private static async Task<Project?> SafeAfterPatchAsync(ProjectStore store, string id, CancellationToken ct) =>
         await store.GetSafeAsync(id, ct);

@@ -69,4 +69,13 @@ public sealed class ProjectStore
         ProjectStateMachine.EnsureTransition(currentStatus, newStatus);
         await UpdateFieldsAsync(id, new Dictionary<string, object?> { ["workspaceStatus"] = newStatus }, ct);
     }
+
+    // Hard delete by id. Used as a rollback path when an outer
+    // operation (e.g. Pier admin-API app creation) fails after we've
+    // reserved a Project record. Caller is responsible for any child
+    // record cleanup; for the auto-create rollback path there are no
+    // children yet because we delete immediately on Pier failure.
+    public async Task DeleteAsync(string id, CancellationToken ct = default) =>
+        await _plexxer.DeleteAsync<Project>(
+            new Dictionary<string, object?> { ["_id:eq"] = id }, ct);
 }

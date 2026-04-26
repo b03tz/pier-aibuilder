@@ -6,6 +6,13 @@
       </v-app-bar-title>
       <v-spacer />
       <template v-if="auth.signedIn">
+        <v-btn
+          icon="mdi-cog-outline"
+          variant="text"
+          density="comfortable"
+          to="/settings"
+          aria-label="Settings"
+        />
         <v-menu>
           <template #activator="{ props: menuProps }">
             <v-btn v-bind="menuProps" variant="text" append-icon="mdi-chevron-down">
@@ -13,6 +20,7 @@
             </v-btn>
           </template>
           <v-list density="compact">
+            <v-list-item prepend-icon="mdi-cog-outline" title="Settings" to="/settings" />
             <v-list-item prepend-icon="mdi-key-variant" title="Change password" @click="showChangePwd = true" />
             <v-list-item prepend-icon="mdi-logout" title="Log out" @click="onLogout" />
           </v-list>

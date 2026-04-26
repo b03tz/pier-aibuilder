@@ -6,6 +6,7 @@ const routes = [
   { path: '/',          name: 'projects', component: () => import('../views/Projects.vue') },
   { path: '/projects/new', name: 'new-project', component: () => import('../views/NewProject.vue') },
   { path: '/projects/:id', name: 'project', component: () => import('../views/ProjectDetail.vue'), props: true },
+  { path: '/settings',     name: 'settings', component: () => import('../views/Settings.vue') },
   { path: '/:path(.*)*', redirect: '/' },
 ]
 

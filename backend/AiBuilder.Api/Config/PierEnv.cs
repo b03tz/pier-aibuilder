@@ -6,8 +6,28 @@ public sealed record PierEnv(
     string AppDataDir,
     string? PublicApiBase,
     string? FrontendOrigin,
+    string? PierAdminToken,
+    string PierAdminBase,
     bool Prod)
 {
+    // Whether the "Create project on Pier" auto-bootstrap feature is
+    // enabled. Driven by presence of an admin token; PIER_ADMIN_BASE has
+    // a sensible default so it isn't part of the gate.
+    public bool PierAdminConfigured => !string.IsNullOrWhiteSpace(PierAdminToken);
+
+    // Last four chars of the admin token, for display purposes only.
+    // Returns null when the token isn't set. Never use the full token in
+    // log lines or UI strings — only this masked form.
+    public string? PierAdminTokenLastFour
+    {
+        get
+        {
+            var t = PierAdminToken;
+            if (string.IsNullOrEmpty(t) || t.Length < 4) return null;
+            return t[^4..];
+        }
+    }
+
     public static PierEnv LoadOrThrow()
     {
         string Require(string key) =>
@@ -32,6 +52,15 @@ public sealed record PierEnv(
             // from api-<app>.onpier.tech and the frontend from <app>.onpier.tech
             // so CORS must allow that origin with credentials.
             FrontendOrigin:  Environment.GetEnvironmentVariable("FRONTEND_ORIGIN"),
+            // Pier admin-API integration. Both optional — when absent, the
+            // "Create project on Pier" feature stays disabled instead of
+            // throwing on boot, so an AiBuilder host that doesn't have an
+            // admin token can still run (just without auto-create). The
+            // base URL must be loopback in prod (Pier's origin gate);
+            // dev-on-allowlisted-IP can override to https://admin.<host>.
+            PierAdminToken:  Environment.GetEnvironmentVariable("PIER_ADMIN_TOKEN"),
+            PierAdminBase:   (Environment.GetEnvironmentVariable("PIER_ADMIN_BASE") ?? "http://127.0.0.1:8080")
+                                .TrimEnd('/'),
             Prod:            !string.Equals(aspEnv, "Development", StringComparison.OrdinalIgnoreCase));
     }
 }

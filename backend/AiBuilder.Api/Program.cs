@@ -5,6 +5,7 @@ using AiBuilder.Api.Projects;
 using AiBuilder.Api.Projects.Build;
 using AiBuilder.Api.Projects.Deploy;
 using AiBuilder.Api.Projects.Import;
+using AiBuilder.Api.Projects.Provisioning;
 using AiBuilder.Api.Projects.Scope;
 using AiBuilder.Api.Projects.Vcs;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -48,6 +49,7 @@ builder.Services.AddSingleton<DeployOrchestrator>();
 builder.Services.AddSingleton<PushOrchestrator>();
 builder.Services.AddSingleton<ImportPierEnvMirror>();
 builder.Services.AddSingleton<ImportIntrospector>();
+builder.Services.AddSingleton<PierAdminClient>();
 builder.Services.AddHttpClient();
 
 builder.Services.AddAuthentication(AuthEndpoints.CookieScheme)
@@ -119,6 +121,7 @@ app.MapBuilds();
 app.MapWorkspace();
 app.MapDeploy();
 app.MapVcs();
+app.MapPierAdmin();
 
 // Static frontend (Vue/Vite build output). Served at the app root.
 var frontendDist = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "frontend", "dist"));

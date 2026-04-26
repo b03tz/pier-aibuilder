@@ -76,9 +76,30 @@ export interface ImportReportDto {
   introspectionError: string | null
 }
 
+// Surfaced only on auto-create. Reports the bootstrapped Pier app and
+// whether the post-create env seed (PIER_API_TOKEN/BASE) succeeded.
+export interface ProvisioningReportDto {
+  pierAppName: string
+  apiBaseUrl: string
+  apiDomain: string
+  frontendDomain: string | null
+  envSeedOk: boolean
+  envSeedError: string | null
+}
+
 export interface CreateProjectResponse {
   project: ProjectDto
   import: ImportReportDto | null
+  provisioning: ProvisioningReportDto | null
+}
+
+// GET /api/_pier-admin/status — used by the Settings page and by NewProject
+// to decide whether to enable the "Create project on Pier" checkbox. Never
+// includes the full token; only the last four chars for spot-check display.
+export interface PierAdminStatusDto {
+  configured: boolean
+  base: string
+  tokenLastFour: string | null
 }
 
 export interface TurnDto {
