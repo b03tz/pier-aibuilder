@@ -53,4 +53,33 @@ public sealed class AdminStore
             },
             ct);
     }
+
+    public async Task<Admin?> FindByIdForAuthAsync(string adminId, CancellationToken ct = default)
+    {
+        var results = await _plexxer.ReadAsync<Admin>(new Dictionary<string, object?>
+        {
+            ["_id:eq"] = adminId,
+            ["query"] = new Dictionary<string, object?> { ["limit"] = 1 },
+        }, ct);
+        return results.Count == 0 ? null : results[0];
+    }
+
+    // Atomic write of both fields. When enabling, pass the new Base32 secret;
+    // when disabling, pass null and we clear the secret in the same write so
+    // the gate flip + secret wipe can't be observed half-applied.
+    public async Task UpdateTotpAsync(string adminId, string? secretBase32, bool enabled, CancellationToken ct = default)
+    {
+        await _plexxer.UpdateAsync<Admin>(
+            new Dictionary<string, object?> { ["_id:eq"] = adminId },
+            new Dictionary<string, object?>
+            {
+                [":set"] = new Dictionary<string, object?>
+                {
+                    ["totpSecret"]  = secretBase32,
+                    ["totpEnabled"] = enabled,
+                    ["updatedAt"]   = DateTime.UtcNow,
+                },
+            },
+            ct);
+    }
 }

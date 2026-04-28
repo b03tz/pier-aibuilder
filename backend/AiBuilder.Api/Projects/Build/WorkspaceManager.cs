@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using AiBuilder.Api.Config;
 
 namespace AiBuilder.Api.Projects.Build;
@@ -137,6 +138,127 @@ public sealed class WorkspaceManager
             // That's fine — we just report nulls.
         }
         return new HeadInfo(branch, sha, shortSha, subject, committedAt);
+    }
+
+    public sealed record PullResult(
+        bool Ok,
+        string? ErrorCode,
+        string? ErrorMessage,
+        string? PreviousSha,
+        string? NewSha,
+        int FilesChanged,
+        IReadOnlyList<string> UncommittedFiles,
+        string CombinedOutput);
+
+    // Sync the workspace down from the remote. Default behaviour: fast-forward
+    // only — refuses if the workspace has uncommitted changes. With
+    // discardLocalChanges=true: hard-reset to origin/<branch> and clean
+    // untracked files. Caller is responsible for serialising against build /
+    // deploy / push via ProjectLockManager.
+    public async Task<PullResult> PullAsync(string pierAppName, string branch, bool discardLocalChanges, CancellationToken ct)
+    {
+        var path = ResolvePath(pierAppName);
+        if (!Directory.Exists(Path.Combine(path, ".git")))
+            return new PullResult(false, "not-a-repo", "Workspace has no .git directory.",
+                null, null, 0, Array.Empty<string>(), "");
+
+        var combined = new StringBuilder();
+        void Log(string label, string stdout, string stderr)
+        {
+            combined.Append("$ git ").AppendLine(label);
+            if (!string.IsNullOrWhiteSpace(stdout)) combined.AppendLine(stdout.TrimEnd());
+            if (!string.IsNullOrWhiteSpace(stderr)) combined.AppendLine(stderr.TrimEnd());
+        }
+
+        var previousSha = (await TryReadGitAsync(path, ct, "rev-parse", "HEAD"))?.Trim();
+
+        var fetch = await TryRunGitWithOutputAsync(path, ct, "fetch", "origin", branch);
+        Log($"fetch origin {branch}", fetch.Stdout, fetch.Stderr);
+        if (!fetch.Ok)
+            return new PullResult(false, "fetch-failed", TruncateStderr(fetch.Stderr),
+                previousSha, null, 0, Array.Empty<string>(), combined.ToString());
+
+        var statusOut = (await TryReadGitAsync(path, ct, "status", "--porcelain"))?.Trim() ?? "";
+        var dirtyFiles = string.IsNullOrEmpty(statusOut)
+            ? Array.Empty<string>()
+            : statusOut.Split('\n')
+                .Select(line => line.Length > 3 ? line[3..].Trim() : line.Trim())
+                .Where(s => !string.IsNullOrEmpty(s))
+                .ToArray();
+
+        if (dirtyFiles.Length > 0 && !discardLocalChanges)
+            return new PullResult(false, "workspace-dirty",
+                $"Workspace has {dirtyFiles.Length} uncommitted file(s).",
+                previousSha, null, 0, dirtyFiles, combined.ToString());
+
+        if (discardLocalChanges)
+        {
+            var reset = await TryRunGitWithOutputAsync(path, ct, "reset", "--hard", $"origin/{branch}");
+            Log($"reset --hard origin/{branch}", reset.Stdout, reset.Stderr);
+            if (!reset.Ok)
+                return new PullResult(false, "reset-failed", TruncateStderr(reset.Stderr),
+                    previousSha, null, 0, dirtyFiles, combined.ToString());
+
+            // -d removes untracked dirs too. .gitignored files are left alone
+            // by default, which keeps node_modules/ etc. (also gitignored)
+            // intact across pulls.
+            var clean = await TryRunGitWithOutputAsync(path, ct, "clean", "-fd");
+            Log("clean -fd", clean.Stdout, clean.Stderr);
+        }
+        else
+        {
+            var pull = await TryRunGitWithOutputAsync(path, ct, "pull", "--ff-only", "origin", branch);
+            Log($"pull --ff-only origin {branch}", pull.Stdout, pull.Stderr);
+            if (!pull.Ok)
+            {
+                var stderr = pull.Stderr ?? "";
+                var code =
+                    stderr.Contains("non-fast-forward", StringComparison.OrdinalIgnoreCase) ||
+                    stderr.Contains("diverged", StringComparison.OrdinalIgnoreCase) ||
+                    stderr.Contains("rejected", StringComparison.OrdinalIgnoreCase)
+                        ? "diverged" : "pull-failed";
+                return new PullResult(false, code, TruncateStderr(stderr),
+                    previousSha, null, 0, Array.Empty<string>(), combined.ToString());
+            }
+        }
+
+        var newSha = (await TryReadGitAsync(path, ct, "rev-parse", "HEAD"))?.Trim();
+
+        var changed = 0;
+        if (!string.IsNullOrWhiteSpace(previousSha) &&
+            !string.IsNullOrWhiteSpace(newSha) &&
+            previousSha != newSha)
+        {
+            var diff = await TryReadGitAsync(path, ct, "diff", "--name-only", $"{previousSha}..{newSha}");
+            if (!string.IsNullOrWhiteSpace(diff))
+                changed = diff.Trim().Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
+        }
+
+        return new PullResult(true, null, null, previousSha, newSha, changed,
+            Array.Empty<string>(), combined.ToString());
+    }
+
+    // Like TryRunGitAsync but captures stdout too. Used by PullAsync where
+    // both streams carry useful info (e.g. `git pull` writes "Already up to
+    // date." on stdout and the "From <remote>" header on stderr).
+    private static async Task<(bool Ok, string Stdout, string Stderr)> TryRunGitWithOutputAsync(string cwd, CancellationToken ct, params string[] args)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            WorkingDirectory = cwd,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        using var p = Process.Start(psi)!;
+        var stdoutTask = p.StandardOutput.ReadToEndAsync(ct);
+        var stderrTask = p.StandardError.ReadToEndAsync(ct);
+        await p.WaitForExitAsync(ct);
+        return (p.ExitCode == 0, await stdoutTask, await stderrTask);
     }
 
     // Like RunGitAsync but returns stdout and never throws on non-zero exit —

@@ -39,30 +39,52 @@
       </v-checkbox>
 
       <v-checkbox
-        v-model="deletePlexxerSchemas"
-        :disabled="!hasPlexxer"
+        v-model="deletePlexxerApp"
+        :disabled="!hasPlexxer || !plexxerAccountConfigured"
         density="comfortable"
         hide-details
-        class="mb-2"
+        class="mb-1"
       >
         <template #label>
           <span class="text-body-2">
-            Wipe the Plexxer schemas in
+            Delete the Plexxer app
             <code>{{ project.plexxerAppId || 'no plexxer configured' }}</code>
+            <span v-if="hasPlexxer && !plexxerAccountConfigured" class="text-caption text-medium-emphasis">
+              (account token not configured — set PLEXXER_ACCOUNT_TOKEN to enable)
+            </span>
+          </span>
+        </template>
+      </v-checkbox>
+
+      <v-checkbox
+        v-model="forcePlexxerError"
+        :disabled="!deletePlexxerApp"
+        density="comfortable"
+        hide-details
+        class="mb-2 ml-6"
+      >
+        <template #label>
+          <span class="text-body-2 text-medium-emphasis">
+            Force — continue if Plexxer can't delete the app
           </span>
         </template>
       </v-checkbox>
 
       <v-alert
-        v-if="deletePlexxerSchemas"
+        v-if="deletePlexxerApp"
         type="warning"
         variant="tonal"
         density="compact"
         class="mb-3"
       >
-        This destroys every record in the deployed app's database. Plexxer's
-        admin-level "delete app" endpoint isn't live yet, so the empty app
-        shell will remain — but every entity and every row in it will be gone.
+        This removes the entire Plexxer app — every entity, every row, and
+        the app shell. Plexxer soft-deletes (recoverable for a short window
+        via Plexxer's dashboard); after that it's gone.
+        <span v-if="forcePlexxerError">
+          <br /><strong>Force is on:</strong> if Plexxer rejects the call
+          (already deleted manually, account token has no grants on this
+          app, etc.) the rest of the cleanup proceeds anyway.
+        </span>
       </v-alert>
 
       <v-divider class="mb-3" />
@@ -108,6 +130,7 @@ const props = defineProps<{
   modelValue: boolean
   project: ProjectDto
   pierAdminConfigured: boolean
+  plexxerAccountConfigured: boolean
 }>()
 
 const emit = defineEmits<{
@@ -115,11 +138,12 @@ const emit = defineEmits<{
   (e: 'deleted'): void
 }>()
 
-const deletePierApp        = ref(false)
-const deletePlexxerSchemas = ref(false)
-const confirmInput         = ref('')
-const error                = ref<string | null>(null)
-const busy                 = ref(false)
+const deletePierApp     = ref(false)
+const deletePlexxerApp  = ref(false)
+const forcePlexxerError = ref(false)
+const confirmInput      = ref('')
+const error             = ref<string | null>(null)
+const busy              = ref(false)
 
 const hasPlexxer = computed(() => !!props.project.plexxerAppId)
 const confirmPhrase = computed(() => `delete ${props.project.pierAppName}`)
@@ -130,12 +154,18 @@ const canSubmit = computed(() =>
 // run's input doesn't sit there pre-typed.
 watch(() => props.modelValue, (open) => {
   if (open) {
-    deletePierApp.value        = props.pierAdminConfigured
-    deletePlexxerSchemas.value = false
-    confirmInput.value         = ''
-    error.value                = null
+    deletePierApp.value     = props.pierAdminConfigured
+    deletePlexxerApp.value  = hasPlexxer.value && props.plexxerAccountConfigured
+    forcePlexxerError.value = false
+    confirmInput.value      = ''
+    error.value             = null
   }
 })
+
+// If the user unticks "Delete the Plexxer app" mid-flow, dragging the
+// force flag along avoids it lingering as a no-op default for the next
+// re-tick.
+watch(deletePlexxerApp, (on) => { if (!on) forcePlexxerError.value = false })
 
 function onCancel() {
   if (busy.value) return
@@ -147,9 +177,10 @@ async function onDelete() {
   error.value = null
   try {
     const params = new URLSearchParams({
-      confirm:              confirmPhrase.value,
-      deletePierApp:        String(deletePierApp.value),
-      deletePlexxerSchemas: String(deletePlexxerSchemas.value),
+      confirm:           confirmPhrase.value,
+      deletePierApp:     String(deletePierApp.value),
+      deletePlexxerApp:  String(deletePlexxerApp.value),
+      forcePlexxerError: String(forcePlexxerError.value),
     })
     await api.delete(`/api/projects/${props.project.id}?${params.toString()}`)
     emit('deleted')
@@ -175,7 +206,11 @@ function formatError(e: any): string {
 <style scoped>
 .danger-card {
   border: 1px solid rgba(244, 67, 54, 0.45);
-  background: linear-gradient(180deg, rgba(244, 67, 54, 0.04) 0%, transparent 60%);
+  /* Layer the red wash over Vuetify's surface color — the previous
+     `background:` shorthand wiped the surface, leaving the card
+     transparent so the page bled through. */
+  background-color: rgb(var(--v-theme-surface));
+  background-image: linear-gradient(180deg, rgba(244, 67, 54, 0.06) 0%, transparent 60%);
 }
 .mono-input :deep(input) {
   font-family: ui-monospace, Menlo, Monaco, 'Courier New', monospace;

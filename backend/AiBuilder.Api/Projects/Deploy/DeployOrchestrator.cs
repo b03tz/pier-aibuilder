@@ -95,11 +95,22 @@ public sealed class DeployOrchestrator
         string? backendZip = null;
         if (hasBackend)
         {
-            notes.AppendLine("[step] dotnet publish");
+            // `dotnet publish` with no project arg only auto-discovers files
+            // in the immediate cwd. Imported repos often have the csproj one
+            // or more levels deeper (e.g. backend/src/MyApi/MyApi.csproj), so
+            // we resolve it ourselves and pass the path explicitly.
+            var resolved = ResolveBackendCsproj(backendDir);
+            if (resolved.Path is null)
+            {
+                notes.AppendLine($"[step] dotnet publish: {resolved.Error}");
+                return new Result("", "failed", null, null, resolved.Error!);
+            }
+
+            var rel = Path.GetRelativePath(backendDir, resolved.Path);
+            notes.AppendLine($"[step] dotnet publish (project: backend/{rel.Replace(Path.DirectorySeparatorChar, '/')})");
             var publishOut = Path.Combine(workspace, ".aibuilder", "publish");
             if (Directory.Exists(publishOut)) Directory.Delete(publishOut, recursive: true);
-            // cwd = backend/; dotnet auto-discovers the csproj/sln there.
-            var pub = await _publish.DotnetPublishAsync(backendDir, publishOut, ct);
+            var pub = await _publish.DotnetPublishAsync(resolved.Path, backendDir, publishOut, ct);
             notes.AppendLine(TrimForNotes(pub.Stdout, 2000));
             if (pub.ExitCode != 0)
             {
@@ -300,6 +311,57 @@ public sealed class DeployOrchestrator
                 .Sum();
         }
         catch { return 0L; }
+    }
+
+    private sealed record CsprojResolution(string? Path, string? Error);
+
+    // Recurse `backendDir` looking for a single deployable .csproj. Skips
+    // build-output and tooling dirs. If multiple are found, prefer ones
+    // whose top-level Project SDK is Microsoft.NET.Sdk.Web or that declare
+    // <OutputType>Exe</OutputType> — that's how we identify the publishable
+    // entry point amongst e.g. test projects.
+    private static CsprojResolution ResolveBackendCsproj(string backendDir)
+    {
+        var skip = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "bin", "obj", "node_modules", ".aibuilder", ".git" };
+        var allCsprojs = Directory.EnumerateFiles(backendDir, "*.csproj", SearchOption.AllDirectories)
+            .Where(p => !Path.GetRelativePath(backendDir, p)
+                .Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar })
+                .Any(seg => skip.Contains(seg)))
+            .ToList();
+
+        if (allCsprojs.Count == 0)
+            return new CsprojResolution(null, $"no .csproj found under backend/ (looked recursively in {backendDir})");
+
+        if (allCsprojs.Count == 1)
+            return new CsprojResolution(allCsprojs[0], null);
+
+        var deployable = allCsprojs.Where(IsDeployableCsproj).ToList();
+        if (deployable.Count == 1)
+            return new CsprojResolution(deployable[0], null);
+
+        var rels = string.Join(", ", allCsprojs.Select(p => Path.GetRelativePath(backendDir, p).Replace(Path.DirectorySeparatorChar, '/')));
+        var which = deployable.Count == 0
+            ? "none look like a deployable web/exe project"
+            : $"multiple look deployable ({deployable.Count})";
+        return new CsprojResolution(null,
+            $"ambiguous — {allCsprojs.Count} .csproj files under backend/ ({rels}); {which}; expected exactly one with Sdk=\"Microsoft.NET.Sdk.Web\" or <OutputType>Exe</OutputType>");
+    }
+
+    private static bool IsDeployableCsproj(string path)
+    {
+        try
+        {
+            var xml = File.ReadAllText(path);
+            if (xml.Contains("Microsoft.NET.Sdk.Web", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (System.Text.RegularExpressions.Regex.IsMatch(
+                    xml,
+                    @"<OutputType>\s*Exe\s*</OutputType>",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                return true;
+        }
+        catch { /* unreadable csproj is treated as non-deployable */ }
+        return false;
     }
 
     private static double? TryParseVersion(string body)

@@ -2,7 +2,10 @@
   <v-app>
     <v-app-bar density="compact" flat border>
       <v-app-bar-title>
-        <router-link to="/" class="logo">AiBuilder</router-link>
+        <router-link to="/" class="logo">
+          <img src="/aibuilder-logo.svg" alt="" class="logo-mark" />
+          <span class="logo-text">AiBuilder</span>
+        </router-link>
       </v-app-bar-title>
       <v-spacer />
       <template v-if="auth.signedIn">
@@ -51,5 +54,13 @@ async function onLogout() {
 </script>
 
 <style scoped>
-.logo { color: inherit; text-decoration: none; font-weight: 600; letter-spacing: 0.4px; }
+.logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: inherit;
+  text-decoration: none;
+}
+.logo-mark { width: 24px; height: 24px; display: block; }
+.logo-text { font-weight: 600; letter-spacing: 0.4px; }
 </style>

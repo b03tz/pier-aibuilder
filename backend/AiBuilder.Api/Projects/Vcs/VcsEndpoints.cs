@@ -23,6 +23,19 @@ public static class VcsEndpoints
 
     public sealed record CloneResponse(bool Ok, string? Error, int? EnvMirroredCount, string? EnvMirrorError, bool? IntrospectionOk, string? IntrospectionError);
 
+    public sealed record PullRequest(bool DiscardLocalChanges);
+
+    public sealed record PullResponse(
+        bool Ok,
+        string? ErrorCode,
+        string? ErrorMessage,
+        string? PreviousSha,
+        string? NewSha,
+        int FilesChanged,
+        IReadOnlyList<string> UncommittedFiles,
+        string Output,
+        VcsStateDto? State);
+
     public static void MapVcs(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/projects/{id}/vcs").RequireAuthorization().WithTags("vcs");
@@ -125,6 +138,68 @@ public static class VcsEndpoints
                 var mirror = await envMirror.MirrorAsync(p.Id!, p.pierAppName, p.pierApiToken, ct);
                 var intro  = await introspector.RunAsync(p.Id!, p.pierAppName, ct);
                 return Results.Ok(new CloneResponse(true, null, mirror.Mirrored, mirror.Error, intro.Ok, intro.Error));
+            }
+            finally { sem.Release(); }
+        });
+
+        // Sync workspace ← remote. Refuses by default if the workspace has
+        // uncommitted changes; pass DiscardLocalChanges=true to hard-reset to
+        // origin/<branch> and clean untracked files.
+        group.MapPost("/pull", async (
+            string id,
+            PullRequest? body,
+            ProjectStore projects,
+            WorkspaceManager ws,
+            ProjectLockManager locks,
+            CancellationToken ct) =>
+        {
+            var p = await projects.GetSafeAsync(id, ct);
+            if (p is null) return Results.NotFound();
+
+            if (string.IsNullOrWhiteSpace(p.gitRemoteUrl))
+                return Results.Conflict(new { error = "no-remote-configured" });
+            if (!ws.HasGitWorkspace(p.pierAppName))
+                return Results.Conflict(new { error = "not-a-repo",
+                    message = "Workspace has no .git — clone first." });
+
+            // Don't pull while the project is mid-iteration; claude is
+            // actively writing to the same workspace.
+            if (p.workspaceStatus == WorkspaceStatus.Building ||
+                p.workspaceStatus == WorkspaceStatus.Updating)
+                return Results.Conflict(new { error = "busy",
+                    message = $"Project is {p.workspaceStatus} — pull is unsafe right now." });
+
+            var sem = locks.Get(id);
+            if (!await sem.WaitAsync(TimeSpan.Zero, ct))
+                return Results.Conflict(new { error = "workspace-busy" });
+
+            try
+            {
+                var branch = string.IsNullOrWhiteSpace(p.gitRemoteBranch) ? "master" : p.gitRemoteBranch!;
+                var discard = body?.DiscardLocalChanges ?? false;
+                var result = await ws.PullAsync(p.pierAppName, branch, discard, ct);
+
+                var head  = await ws.GetHeadInfoAsync(p.pierAppName, ct);
+                var stateDto = new VcsStateDto(
+                    p.gitRemoteUrl, p.gitRemoteBranch,
+                    head.CurrentBranch, head.Sha, head.ShortSha, head.Subject, head.CommittedAt,
+                    p.lastPushSha, p.lastPushAt,
+                    p.isImported ?? false,
+                    ws.HasGitWorkspace(p.pierAppName));
+
+                var response = new PullResponse(
+                    result.Ok, result.ErrorCode, result.ErrorMessage,
+                    result.PreviousSha, result.NewSha, result.FilesChanged,
+                    result.UncommittedFiles, result.CombinedOutput, stateDto);
+
+                // Workspace-dirty is a 409 so the frontend can route it to
+                // the override-prompt path; everything else (success or
+                // genuine git failure) returns 200 with ok=false so the UI
+                // can render the combined git output.
+                if (!result.Ok && result.ErrorCode == "workspace-dirty")
+                    return Results.Json(response, statusCode: 409);
+
+                return Results.Ok(response);
             }
             finally { sem.Release(); }
         });

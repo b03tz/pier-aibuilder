@@ -8,6 +8,15 @@
     <template v-if="canTalk">
       <v-textarea v-model="draft" label="Your message" rows="3" class="mb-3" />
       <div class="d-flex mb-5">
+        <v-btn
+          v-if="canClear"
+          variant="text"
+          color="warning"
+          :loading="clearing"
+          @click="confirmClear = true"
+        >
+          Clear conversation
+        </v-btn>
         <v-spacer />
         <v-btn
           v-if="canLock"
@@ -47,6 +56,27 @@
         <div class="content">{{ t.content }}</div>
       </div>
     </div>
+
+    <v-dialog v-model="confirmClear" max-width="480" persistent>
+      <v-card>
+        <v-card-title>Clear the scope conversation?</v-card-title>
+        <v-card-text>
+          All chat turns for this project will be deleted. The workspace,
+          build history, and deployed app are not affected.
+          <template v-if="project.isImported">
+            <br><br>
+            Because this is an imported project, AiBuilder will re-run
+            codebase introspection so the next conversation starts with
+            a fresh summary. This may take a minute.
+          </template>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" :disabled="clearing" @click="confirmClear = false">Cancel</v-btn>
+          <v-btn color="warning" :loading="clearing" @click="onClear">Clear</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </v-card>
 </template>
 
@@ -61,6 +91,8 @@ const draft = ref('')
 const sending = ref(false)
 const locking = ref(false)
 const unlocking = ref(false)
+const clearing = ref(false)
+const confirmClear = ref(false)
 
 const canTalk = computed(() =>
   ['Draft', 'InConversation', 'Deployed'].includes(props.project.workspaceStatus),
@@ -74,6 +106,13 @@ const canLock = computed(() =>
 // explicit button there would be redundant.
 const canUnlock = computed(() =>
   ['ScopeLocked', 'DoneBuilding', 'DoneUpdating'].includes(props.project.workspaceStatus),
+)
+// Clear-scope is allowed in the same states as /turns posts (Draft,
+// InConversation, Deployed). Hide the button when there's nothing to
+// clear so it doesn't read as a meaningful action on a blank scope.
+const canClear = computed(() =>
+  ['Draft', 'InConversation', 'Deployed'].includes(props.project.workspaceStatus) &&
+  turns.value.length > 0,
 )
 const reversedTurns = computed(() => [...turns.value].sort((a, b) => b.turnIndex - a.turnIndex))
 
@@ -114,6 +153,18 @@ async function onUnlock() {
     emit('changed')
   } finally {
     unlocking.value = false
+  }
+}
+
+async function onClear() {
+  clearing.value = true
+  try {
+    await api.post(`/api/projects/${props.project.id}/clear-scope`)
+    confirmClear.value = false
+    await load()
+    emit('changed')
+  } finally {
+    clearing.value = false
   }
 }
 </script>

@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Generated\PlexxerClient.AiBuilder.csproj" />
+    <ProjectReference Include="..\AiBuilder.Api\AiBuilder.Api.csproj" />
   </ItemGroup>
 </Project>

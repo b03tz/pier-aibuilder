@@ -8,9 +8,11 @@ using AiBuilder.Api.Projects.Import;
 using AiBuilder.Api.Projects.Provisioning;
 using AiBuilder.Api.Projects.Scope;
 using AiBuilder.Api.Projects.Vcs;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http.Json;
+using Microsoft.AspNetCore.RateLimiting;
 using Plexxer.Client.AiBuilder;
 
 var env = PierEnv.LoadOrThrow();
@@ -32,6 +34,7 @@ builder.Services.AddDataProtection()
 // owns its HttpClient with a pinned baseUrl and will be reused across requests.
 builder.Services.AddSingleton(_ => new PlexxerClient(env.PlexxerApiToken, env.PlexxerAppId));
 builder.Services.AddSingleton<AdminStore>();
+builder.Services.AddSingleton<TotpPendingStore>();
 builder.Services.AddSingleton<ProjectStore>();
 builder.Services.AddSingleton<TokenVerifier>();
 builder.Services.AddSingleton<ConversationStore>();
@@ -50,7 +53,7 @@ builder.Services.AddSingleton<PushOrchestrator>();
 builder.Services.AddSingleton<ImportPierEnvMirror>();
 builder.Services.AddSingleton<ImportIntrospector>();
 builder.Services.AddSingleton<PierAdminClient>();
-builder.Services.AddSingleton<PlexxerSchemaWiper>();
+builder.Services.AddSingleton<PlexxerAdminClient>();
 builder.Services.AddHttpClient();
 
 builder.Services.AddAuthentication(AuthEndpoints.CookieScheme)
@@ -78,6 +81,26 @@ builder.Services.AddAuthentication(AuthEndpoints.CookieScheme)
 
 builder.Services.AddAuthorization();
 
+// Per-IP fixed window: 10 attempts / 5 minutes covering /auth/login AND
+// /auth/login/totp under one bucket. Rejects with 429 (no Retry-After body —
+// we don't want to leak exact remaining time). Uses RemoteIpAddress; if a
+// reverse proxy rewrites that, set it via UseForwardedHeaders.
+builder.Services.AddRateLimiter(opts =>
+{
+    opts.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    opts.AddPolicy(AuthEndpoints.LoginRateLimiterPolicy, ctx =>
+    {
+        var key = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetFixedWindowLimiter(key, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 10,
+            Window = TimeSpan.FromMinutes(5),
+            QueueLimit = 0,
+            AutoReplenishment = true,
+        });
+    });
+});
+
 builder.Services.Configure<JsonOptions>(o =>
 {
     o.SerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
@@ -99,6 +122,7 @@ var app = builder.Build();
 
 app.UseCors("default");
 
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -123,6 +147,7 @@ app.MapWorkspace();
 app.MapDeploy();
 app.MapVcs();
 app.MapPierAdmin();
+app.MapPlexxerAdmin();
 
 // Static frontend (Vue/Vite build output). Served at the app root.
 var frontendDist = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "frontend", "dist"));

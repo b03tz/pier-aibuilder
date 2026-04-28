@@ -22,4 +22,10 @@ public sealed class Admin
 
     [JsonPropertyName("updatedAt")]
     public DateTime updatedAt { get; set; }
+
+    [JsonPropertyName("totpSecret")]
+    public string? totpSecret { get; set; }
+
+    [JsonPropertyName("totpEnabled")]
+    public bool totpEnabled { get; set; }
 }

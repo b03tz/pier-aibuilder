@@ -23,6 +23,18 @@
         >
           Manage in Pier
         </v-btn>
+        <v-btn
+          v-if="plexxerManageUrl"
+          :href="plexxerManageUrl"
+          target="_blank"
+          rel="noopener"
+          variant="text"
+          size="small"
+          prepend-icon="mdi-open-in-new"
+          class="mr-1"
+        >
+          Manage in Plexxer
+        </v-btn>
         <v-menu>
           <template #activator="{ props: menuProps }">
             <v-btn v-bind="menuProps" icon="mdi-dots-vertical" size="small" variant="text" />
@@ -50,6 +62,7 @@
         v-model="showDelete"
         :project="project"
         :pier-admin-configured="pierAdminConfigured"
+        :plexxer-account-configured="plexxerAccountConfigured"
         @deleted="onDeleted"
       />
 
@@ -112,7 +125,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, type PierAdminStatusDto, type ProjectDto } from '../api/client'
+import { api, type PierAdminStatusDto, type PlexxerAdminStatusDto, type ProjectDto } from '../api/client'
 import ScopeTab from '../components/ScopeTab.vue'
 import BuildTab from '../components/BuildTab.vue'
 import FilesTab from '../components/FilesTab.vue'
@@ -132,17 +145,18 @@ const resetting = ref(false)
 const resetError = ref<string | null>(null)
 
 const showDelete = ref(false)
-const pierAdminConfigured = ref(false)
+const pierAdminConfigured     = ref(false)
+const plexxerAccountConfigured = ref(false)
 
 async function openDelete() {
-  // Pull the admin-status fresh so the dialog renders the right
-  // default-state for the "Delete the Pier app" checkbox.
-  try {
-    const s = await api.get<PierAdminStatusDto>('/api/_pier-admin/status')
-    pierAdminConfigured.value = s.configured
-  } catch {
-    pierAdminConfigured.value = false
-  }
+  // Pull both admin-statuses fresh so the dialog renders the right
+  // default-state for each "Delete the … app" checkbox.
+  const [p, x] = await Promise.allSettled([
+    api.get<PierAdminStatusDto>('/api/_pier-admin/status'),
+    api.get<PlexxerAdminStatusDto>('/api/_plexxer-admin/status'),
+  ])
+  pierAdminConfigured.value      = p.status === 'fulfilled' ? p.value.configured : false
+  plexxerAccountConfigured.value = x.status === 'fulfilled' ? x.value.configured : false
   showDelete.value = true
 }
 
@@ -183,6 +197,13 @@ const pierManageUrl = computed(() =>
   project.value
     ? `https://admin.onpier.tech/Apps/Detail/${encodeURIComponent(project.value.pierAppName)}`
     : '#')
+
+// Direct deep-link into Plexxer's dashboard for the project's app.
+// Hidden when the project doesn't use Plexxer.
+const plexxerManageUrl = computed(() =>
+  project.value?.plexxerAppId
+    ? `https://plexxer.com/apps/${encodeURIComponent(project.value.plexxerAppId)}`
+    : null)
 
 function statusColor(s: string) {
   if (s.startsWith('Done')) return 'success'

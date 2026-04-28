@@ -1,7 +1,7 @@
 <template>
   <v-container>
     <h1 class="text-h5 mb-4">{{ headline }}</h1>
-    <v-card class="pa-6" max-width="720">
+    <v-card class="pa-6" max-width="900">
       <v-btn-toggle
         v-model="form.isImport"
         mandatory
@@ -14,116 +14,144 @@
       </v-btn-toggle>
 
       <v-form @submit.prevent="onSubmit">
-        <v-text-field v-model="form.name" label="Project name *" class="mb-3" />
+        <v-text-field v-model="form.name" label="Project name *" class="mb-1" />
+        <div v-if="!form.isImport && slugPreview" class="text-caption text-medium-emphasis mb-3">
+          Subdomain: <code>{{ slugPreview }}</code>
+          <span class="text-medium-emphasis">— used as the default name on both providers</span>
+        </div>
+        <div v-else class="mb-3" />
 
-        <!-- Auto-create-on-Pier panel.
-             Visible only on new projects; disabled with a setup hint
-             when PIER_ADMIN_TOKEN isn't configured. -->
-        <v-card
-          v-if="!form.isImport"
-          variant="outlined"
-          class="pa-4 mb-3"
-          :class="autoCreateAllowed ? 'border-primary-tone' : 'border-muted'"
-        >
-          <div class="d-flex align-center">
-            <v-checkbox
-              v-model="form.autoCreateOnPier"
-              :disabled="!autoCreateAllowed"
-              hide-details
-              density="compact"
-              class="mr-3"
-            />
-            <div class="flex-grow-1">
-              <div class="text-subtitle-2">Create project on Pier</div>
-              <div class="text-caption text-medium-emphasis">
-                <template v-if="autoCreateAllowed">
-                  Pier will host this app and receive deploys automatically.
-                  Uncheck to bind an existing Pier app instead.
-                </template>
-                <template v-else>
-                  Set <code>PIER_ADMIN_TOKEN</code> and
-                  <code>PIER_ADMIN_BASE</code> in Pier env to enable
-                  automatic Pier provisioning.
-                  <router-link to="/settings">Open Settings →</router-link>
-                </template>
-              </div>
-            </div>
-          </div>
-
-          <!-- Live preview + manual override + has-frontend toggle -->
-          <template v-if="autoCreate">
-            <v-divider class="my-3" />
-            <div class="text-caption text-medium-emphasis mb-1">
-              Pier subdomain (auto-derived from the project name)
-            </div>
-            <v-text-field
-              v-model="form.slugOverride"
-              :placeholder="slugPreview || 'will be filled in once you type a name'"
-              label="Subdomain"
-              density="comfortable"
-              :error-messages="slugOverrideError ?? undefined"
-              hide-details="auto"
-              prepend-inner-icon="mdi-link-variant"
+        <!-- Two-card provisioning row. Hidden in import mode (imports always
+             attach to existing infrastructure on both sides). -->
+        <v-row v-if="!form.isImport" dense class="mb-3">
+          <v-col cols="12" md="6">
+            <ProvisionCard
+              title="Pier hosting"
+              icon="mdi-server"
+              providerEnvVar="PIER_ADMIN_TOKEN"
+              :status="pierStatus"
+              :mode="form.pierMode"
+              @update:mode="form.pierMode = $event"
+              :slug-preview="slugPreview"
             >
-              <template v-if="!form.slugOverride && slugPreview" #append-inner>
-                <span class="text-caption text-medium-emphasis">{{ slugPreview }}.onpier.tech</span>
+              <template #auto>
+                <v-text-field
+                  v-model="form.pierSlugOverride"
+                  :placeholder="slugPreview || 'will be filled in once you type a name'"
+                  label="Subdomain override (optional)"
+                  density="comfortable"
+                  :error-messages="pierSlugOverrideError ?? undefined"
+                  hide-details="auto"
+                  prepend-inner-icon="mdi-link-variant"
+                  class="mb-2"
+                />
+                <div class="text-caption text-medium-emphasis mb-2">
+                  Final URL: <code>{{ pierEffectiveSlug || '…' }}.onpier.tech</code>
+                </div>
+                <v-checkbox
+                  v-model="form.hasFrontend"
+                  label="Includes a frontend (Vue UI)"
+                  hide-details
+                  density="compact"
+                />
               </template>
-            </v-text-field>
-            <div class="text-caption text-medium-emphasis mt-1">
-              Leave blank to use the auto-derived value. Must match
-              <code>^[a-z][a-z0-9-]{1,30}$</code>.
-            </div>
+              <template #existing>
+                <v-text-field
+                  v-model="form.pierAppName"
+                  label="Pier app name (subdomain) *"
+                  hint="Must match ^[a-z][a-z0-9-]{1,30}$"
+                  persistent-hint
+                  density="comfortable"
+                  class="mb-2"
+                />
+                <v-text-field
+                  v-model="form.pierApiToken"
+                  label="Pier API token *"
+                  type="password"
+                  density="comfortable"
+                />
+              </template>
+            </ProvisionCard>
+          </v-col>
 
-            <v-checkbox
-              v-model="form.hasFrontend"
-              label="Includes a frontend (Vue UI)"
-              hint="Uncheck for a backend-only API app."
-              persistent-hint
-              density="compact"
-              class="mt-3"
-            />
-          </template>
-        </v-card>
+          <v-col cols="12" md="6">
+            <ProvisionCard
+              title="Plexxer database"
+              icon="mdi-database"
+              providerEnvVar="PLEXXER_ACCOUNT_TOKEN"
+              :status="plexxerStatus"
+              :mode="form.plexxerMode"
+              @update:mode="form.plexxerMode = $event"
+              :slug-preview="slugPreview"
+              allow-none
+            >
+              <template #auto>
+                <div class="text-caption text-medium-emphasis">
+                  A fresh Plexxer app will be created and AiBuilder will
+                  mint a per-app token automatically. The app name on
+                  Plexxer's dashboard defaults to <code>{{ slugPreview || '…' }}</code>;
+                  the unique <code>appKey</code> is server-assigned.
+                </div>
+              </template>
+              <template #existing>
+                <v-text-field
+                  v-model="form.plexxerAppId"
+                  label="Plexxer app ID *"
+                  density="comfortable"
+                  class="mb-2"
+                />
+                <v-text-field
+                  v-model="form.plexxerApiToken"
+                  label="Plexxer API token *"
+                  type="password"
+                  density="comfortable"
+                />
+              </template>
+              <template #empty>
+                <div class="text-caption text-medium-emphasis">
+                  This project won't use a Plexxer database. Pure
+                  frontend / stateless apps only.
+                </div>
+              </template>
+            </ProvisionCard>
+          </v-col>
+        </v-row>
 
-        <!-- Manual Pier credentials (shown when not auto-creating, or for imports) -->
-        <template v-if="needsManualPierFields">
+        <!-- Import-mode credentials. Both Pier + Plexxer creds may be
+             needed since we're attaching to existing infrastructure. -->
+        <template v-if="form.isImport">
+          <v-divider class="my-4" />
+          <div class="text-caption text-medium-emphasis mb-2">
+            Pier (existing app — required)
+          </div>
           <v-text-field
             v-model="form.pierAppName"
             label="Pier app name (subdomain) *"
-            :hint="form.isImport
-              ? 'The existing Pier subdomain — must match ^[a-z][a-z0-9-]{1,30}$'
-              : 'Must match ^[a-z][a-z0-9-]{1,30}$'"
+            hint="The existing Pier subdomain — must match ^[a-z][a-z0-9-]{1,30}$"
             persistent-hint
             class="mb-3"
           />
           <v-text-field
             v-model="form.pierApiToken"
-            :label="form.isImport ? 'Existing Pier API token *' : 'Pier API token *'"
+            label="Existing Pier API token *"
+            type="password"
+            class="mb-3"
+          />
+          <div class="text-caption text-medium-emphasis mb-2">
+            Plexxer (optional — leave both empty if the existing app doesn't use Plexxer)
+          </div>
+          <v-text-field
+            v-model="form.plexxerAppId"
+            label="Existing Plexxer app ID"
+            class="mb-3"
+          />
+          <v-text-field
+            v-model="form.plexxerApiToken"
+            label="Existing Plexxer API token"
             type="password"
             class="mb-3"
           />
         </template>
-
-        <v-divider class="my-4" />
-        <div class="text-caption text-medium-emphasis mb-2">
-          <span v-if="form.isImport">
-            Plexxer (optional — leave both empty if the existing app doesn't use Plexxer).
-          </span>
-          <span v-else>
-            Plexxer (optional — leave both fields empty for apps that don't need persistence, e.g. pure frontend apps).
-          </span>
-        </div>
-        <v-text-field
-          v-model="form.plexxerAppId"
-          :label="form.isImport ? 'Existing Plexxer app ID' : 'Plexxer app ID'"
-          class="mb-3"
-        />
-        <v-text-field
-          v-model="form.plexxerApiToken"
-          :label="form.isImport ? 'Existing Plexxer API token' : 'Plexxer API token'"
-          type="password"
-          class="mb-3"
-        />
 
         <v-divider class="my-4" />
         <div class="text-caption text-medium-emphasis mb-2">
@@ -173,10 +201,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, type CreateProjectResponse, type PierAdminStatusDto } from '../api/client'
+import { api, type CreateProjectResponse, type PierAdminStatusDto, type PlexxerAdminStatusDto } from '../api/client'
 import { derivePierAppSlug, isValidPierAppSlug } from '../pierAppSlug'
+import ProvisionCard from '../components/ProvisionCard.vue'
+
+type ProvisionMode = 'auto' | 'existing' | 'none'
 
 const form = reactive({
   name: '',
@@ -188,42 +219,47 @@ const form = reactive({
   gitRemoteUrl: '',
   gitRemoteBranch: 'master',
   isImport: false as boolean,
-  autoCreateOnPier: true as boolean,
   hasFrontend: true as boolean,
-  slugOverride: '',
+  pierMode:    'auto'     as ProvisionMode,
+  plexxerMode: 'auto'     as ProvisionMode,
+  pierSlugOverride: '',
 })
 
-const adminStatus = ref<PierAdminStatusDto | null>(null)
+const pierStatus    = ref<PierAdminStatusDto    | null>(null)
+const plexxerStatus = ref<PlexxerAdminStatusDto | null>(null)
 const busy = ref(false)
 const error = ref<string | null>(null)
 const router = useRouter()
 
 onMounted(async () => {
-  try {
-    adminStatus.value = await api.get<PierAdminStatusDto>('/api/_pier-admin/status')
-  } catch {
-    // Endpoint requires auth; if we're not logged in we'll have been
-    // redirected away. Treat as "not configured" so the UI doesn't lie.
-    adminStatus.value = { configured: false, base: '', tokenLastFour: null }
-  }
+  // Two parallel status reads. Failure to fetch either is treated as
+  // "not configured" so the UI degrades to the manual paste flow rather
+  // than silently lying.
+  const [p, x] = await Promise.allSettled([
+    api.get<PierAdminStatusDto>('/api/_pier-admin/status'),
+    api.get<PlexxerAdminStatusDto>('/api/_plexxer-admin/status'),
+  ])
+  pierStatus.value    = p.status === 'fulfilled' ? p.value : { configured: false, base: '', tokenLastFour: null }
+  plexxerStatus.value = x.status === 'fulfilled' ? x.value : { configured: false, base: '', tokenLastFour: null }
+
+  // If a side isn't configured, demote its mode to "existing" so the
+  // form doesn't try to submit an auto-create the backend will refuse.
+  if (!pierStatus.value.configured && form.pierMode === 'auto')       form.pierMode = 'existing'
+  if (!plexxerStatus.value.configured && form.plexxerMode === 'auto') form.plexxerMode = 'existing'
 })
-
-const autoCreateAllowed = computed(() =>
-  !form.isImport && (adminStatus.value?.configured ?? false))
-
-const autoCreate = computed(() =>
-  autoCreateAllowed.value && form.autoCreateOnPier)
-
-const needsManualPierFields = computed(() => form.isImport || !autoCreate.value)
 
 const slugPreview = computed(() => {
   if (!form.name.trim()) return ''
   return derivePierAppSlug(form.name)
 })
 
-const slugOverrideError = computed(() => {
-  if (!form.slugOverride) return null
-  return isValidPierAppSlug(form.slugOverride.trim())
+const pierEffectiveSlug = computed(() => {
+  return form.pierSlugOverride.trim() || slugPreview.value
+})
+
+const pierSlugOverrideError = computed(() => {
+  if (!form.pierSlugOverride.trim()) return null
+  return isValidPierAppSlug(form.pierSlugOverride.trim())
     ? null
     : 'Must match ^[a-z][a-z0-9-]{1,30}$'
 })
@@ -232,45 +268,89 @@ const headline = computed(() => form.isImport ? 'Import existing project' : 'New
 
 const submitLabel = computed(() => {
   if (form.isImport) return 'Import'
-  if (autoCreate.value) return 'Create on Pier'
+  if (form.pierMode === 'auto' && form.plexxerMode === 'auto') return 'Create on Pier + Plexxer'
+  if (form.pierMode === 'auto')    return 'Create on Pier'
+  if (form.plexxerMode === 'auto') return 'Create on Plexxer'
   return 'Create'
 })
 
 const canSubmit = computed(() => {
   if (busy.value) return false
   if (!form.name.trim() || !form.scopeBrief.trim()) return false
-  if (autoCreate.value) {
-    // Override slug, when present, must be valid.
-    return slugOverrideError.value === null
+
+  if (form.isImport) {
+    if (form.pierAppName.trim().length < 2) return false
+    if (form.pierApiToken.length === 0) return false
+    if (!form.gitRemoteUrl.trim()) return false
+    return true
   }
-  // Manual / import path — pier creds are required.
-  return form.pierAppName.trim().length >= 2 && form.pierApiToken.length > 0
+
+  // New project: each provider's selection must be self-consistent.
+  if (form.pierMode === 'auto' && pierSlugOverrideError.value !== null) return false
+  if (form.pierMode === 'existing') {
+    if (form.pierAppName.trim().length < 2) return false
+    if (form.pierApiToken.length === 0) return false
+  }
+  if (form.plexxerMode === 'existing') {
+    if (!form.plexxerAppId.trim() || !form.plexxerApiToken.trim()) return false
+  }
+  return true
+})
+
+// Clear paste-fields when switching back to "auto", so we don't
+// accidentally submit stale values.
+watch(() => form.pierMode, (m) => {
+  if (m === 'auto') {
+    form.pierAppName = ''
+    form.pierApiToken = ''
+  }
+})
+watch(() => form.plexxerMode, (m) => {
+  if (m === 'auto' || m === 'none') {
+    form.plexxerAppId = ''
+    form.plexxerApiToken = ''
+  }
 })
 
 async function onSubmit() {
   busy.value = true
   error.value = null
   try {
-    const usingAutoCreate = autoCreate.value
     const body: Record<string, unknown> = {
       name:            form.name,
       scopeBrief:      form.scopeBrief,
       isImport:        form.isImport,
-      plexxerAppId:    form.plexxerAppId.trim()    || undefined,
-      plexxerApiToken: form.plexxerApiToken.trim() || undefined,
       gitRemoteUrl:    form.gitRemoteUrl.trim()    || undefined,
       gitRemoteBranch: form.gitRemoteBranch.trim() || undefined,
     }
-    if (usingAutoCreate) {
-      body.autoCreateOnPier = true
-      body.hasFrontend      = form.hasFrontend
-      // Override is optional; only include when the user typed one.
-      if (form.slugOverride.trim()) body.pierAppName = form.slugOverride.trim()
+
+    if (form.isImport) {
+      // Imports always attach to existing infra on both sides.
+      body.autoCreateOnPier    = false
+      body.autoCreateOnPlexxer = false
+      body.pierAppName         = form.pierAppName.trim()
+      body.pierApiToken        = form.pierApiToken
+      body.plexxerAppId        = form.plexxerAppId.trim()    || undefined
+      body.plexxerApiToken     = form.plexxerApiToken.trim() || undefined
     } else {
-      body.autoCreateOnPier = false
-      body.pierAppName  = form.pierAppName.trim()
-      body.pierApiToken = form.pierApiToken
+      body.autoCreateOnPier    = form.pierMode === 'auto'
+      body.autoCreateOnPlexxer = form.plexxerMode === 'auto'
+
+      if (form.pierMode === 'auto') {
+        body.hasFrontend = form.hasFrontend
+        if (form.pierSlugOverride.trim()) body.pierAppName = form.pierSlugOverride.trim()
+      } else {
+        body.pierAppName  = form.pierAppName.trim()
+        body.pierApiToken = form.pierApiToken
+      }
+
+      if (form.plexxerMode === 'existing') {
+        body.plexxerAppId    = form.plexxerAppId.trim()
+        body.plexxerApiToken = form.plexxerApiToken
+      }
+      // 'auto' and 'none' both leave plexxerAppId/Token undefined.
     }
+
     const r = await api.post<CreateProjectResponse>('/api/projects', body)
     router.push({ name: 'project', params: { id: r.project.id } })
   } catch (e: any) {
@@ -292,8 +372,3 @@ function formatError(e: any): string {
   return e?.message ?? 'Create failed'
 }
 </script>
-
-<style scoped>
-.border-primary-tone { border-color: rgba(106, 168, 255, 0.32); }
-.border-muted        { border-color: rgba(255, 255, 255, 0.06); }
-</style>

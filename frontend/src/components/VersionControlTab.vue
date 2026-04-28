@@ -123,6 +123,120 @@
 
     <v-card class="pa-5 wide">
       <div class="d-flex align-center mb-3">
+        <v-icon color="primary" class="mr-2">mdi-download</v-icon>
+        <h3 class="text-h6 flex-grow-1">Pull</h3>
+        <v-btn
+          color="primary"
+          prepend-icon="mdi-download"
+          :disabled="!canPull"
+          :loading="pulling"
+          @click="onPull(false)"
+        >
+          {{ pullButtonLabel }}
+        </v-btn>
+      </div>
+      <v-alert v-if="!state?.remoteUrl" type="info" variant="tonal" density="compact" class="mb-3">
+        Configure a remote URL above to enable pulling.
+      </v-alert>
+      <v-alert v-else-if="pullBusy" type="warning" variant="tonal" density="compact" class="mb-3">
+        Project is {{ state ? '' : '' }}{{ pullBusyReason }} — pull is disabled until that finishes.
+      </v-alert>
+      <v-alert v-else type="info" variant="tonal" density="compact" class="mb-3">
+        Fast-forwards the workspace to <code>origin/{{ state.branch ?? 'master' }}</code>. If there are local
+        uncommitted changes the pull is refused unless you choose to discard them.
+      </v-alert>
+
+      <v-alert
+        v-if="pullResult?.ok"
+        type="success"
+        variant="tonal"
+        density="compact"
+        class="mb-3"
+      >
+        <template v-if="pullResult.previousSha === pullResult.newSha">
+          Already up to date with <code>origin/{{ state?.branch ?? 'master' }}</code>.
+        </template>
+        <template v-else>
+          Pulled
+          <code class="sha">{{ (pullResult.newSha ?? '').slice(0, 7) }}</code>
+          ({{ pullResult.filesChanged }} file{{ pullResult.filesChanged === 1 ? '' : 's' }} changed).
+        </template>
+      </v-alert>
+
+      <v-alert
+        v-if="pullResult && !pullResult.ok && pullResult.errorCode === 'workspace-dirty'"
+        type="warning"
+        variant="tonal"
+        density="compact"
+        class="mb-3"
+      >
+        <div class="font-weight-medium mb-1">Workspace has uncommitted changes ({{ pullResult.uncommittedFiles.length }})</div>
+        <ul class="dirty-list">
+          <li v-for="f in pullResult.uncommittedFiles.slice(0, 12)" :key="f">{{ f }}</li>
+          <li v-if="pullResult.uncommittedFiles.length > 12" class="muted">
+            …and {{ pullResult.uncommittedFiles.length - 12 }} more
+          </li>
+        </ul>
+        <div class="mt-3">
+          <v-btn
+            size="small"
+            color="error"
+            variant="flat"
+            prepend-icon="mdi-alert-octagon"
+            :loading="pulling"
+            @click="confirmDiscardAndPull"
+          >
+            Discard local changes and pull
+          </v-btn>
+        </div>
+      </v-alert>
+
+      <v-alert
+        v-if="pullResult && !pullResult.ok && pullResult.errorCode !== 'workspace-dirty'"
+        type="error"
+        variant="tonal"
+        density="compact"
+        class="mb-3"
+      >
+        <div class="font-weight-medium mb-1">Pull failed: {{ pullResult.errorCode }}</div>
+        <div v-if="pullResult.errorMessage" class="text-body-2">{{ pullResult.errorMessage }}</div>
+      </v-alert>
+
+      <div v-if="pullResult?.output" class="log-frame">
+        <pre class="log">{{ pullResult.output }}</pre>
+      </div>
+
+      <v-dialog v-model="discardDialog" max-width="520">
+        <v-card class="pa-5">
+          <h3 class="text-h6 mb-3">Discard local changes?</h3>
+          <p class="text-body-2 mb-2">
+            This hard-resets the workspace to <code>origin/{{ state?.branch ?? 'master' }}</code>
+            and deletes untracked files. Any uncommitted edits in the workspace will be lost — including
+            anything claude may have written during a build iteration.
+          </p>
+          <p class="text-body-2 mb-4">
+            <strong>This cannot be undone.</strong>
+          </p>
+          <div class="d-flex">
+            <v-spacer />
+            <v-btn variant="text" @click="discardDialog = false">Cancel</v-btn>
+            <v-btn
+              color="error"
+              variant="flat"
+              class="ml-2"
+              prepend-icon="mdi-alert-octagon"
+              :loading="pulling"
+              @click="performDiscardAndPull"
+            >
+              Discard and pull
+            </v-btn>
+          </div>
+        </v-card>
+      </v-dialog>
+    </v-card>
+
+    <v-card class="pa-5 wide">
+      <div class="d-flex align-center mb-3">
         <v-icon color="primary" class="mr-2">mdi-upload</v-icon>
         <h3 class="text-h6 flex-grow-1">Push</h3>
         <v-btn
@@ -151,7 +265,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { api, type CloneResponse, type ProjectDto, type VcsStateDto } from '../api/client'
+import { api, type CloneResponse, type ProjectDto, type PullResponse, type VcsStateDto } from '../api/client'
 import { useConfigStore } from '../stores/config'
 
 const props = defineProps<{ project: ProjectDto }>()
@@ -168,7 +282,24 @@ const logEl = ref<HTMLPreElement>()
 const pushing = ref(false)
 const cloning = ref(false)
 const cloneResult = ref<CloneResponse | null>(null)
+const pulling = ref(false)
+const pullResult = ref<PullResponse | null>(null)
+const discardDialog = ref(false)
 let eventSource: EventSource | null = null
+
+const pullBusyReason = computed(() => {
+  const s = props.project.workspaceStatus
+  return s === 'Building' || s === 'Updating' ? s.toLowerCase() : ''
+})
+const pullBusy = computed(() => !!pullBusyReason.value)
+const canPull = computed(() =>
+  !!state.value?.remoteUrl && state.value?.workspaceHasGit && !pulling.value && !pullBusy.value)
+const pullButtonLabel = computed(() => {
+  const target = state.value?.remoteUrl
+    ? `${shortenUrl(state.value.remoteUrl)} (${state.value.branch ?? 'master'})`
+    : '—'
+  return `Pull from ${target}`
+})
 
 const needsClone = computed(() =>
   !!state.value && state.value.isImported && !state.value.workspaceHasGit)
@@ -262,6 +393,51 @@ async function onClone() {
   }
 }
 
+async function onPull(discardLocalChanges: boolean) {
+  pulling.value = true
+  if (!discardLocalChanges) pullResult.value = null
+  try {
+    const r = await api.post<PullResponse>(
+      `/api/projects/${props.project.id}/vcs/pull`,
+      { discardLocalChanges },
+    )
+    pullResult.value = r
+    if (r.state) state.value = r.state
+    else await loadState()
+  } catch (e: unknown) {
+    const err = e as { body?: PullResponse | { error?: string; message?: string } }
+    const body = err?.body as Partial<PullResponse> | undefined
+    if (body && typeof body.ok === 'boolean') {
+      pullResult.value = body as PullResponse
+      if (body.state) state.value = body.state
+    } else {
+      const generic = err?.body as { error?: string; message?: string } | undefined
+      pullResult.value = {
+        ok: false,
+        errorCode: generic?.error ?? 'pull-failed',
+        errorMessage: generic?.message ?? null,
+        previousSha: null,
+        newSha: null,
+        filesChanged: 0,
+        uncommittedFiles: [],
+        output: '',
+        state: null,
+      }
+    }
+  } finally {
+    pulling.value = false
+    discardDialog.value = false
+  }
+}
+
+function confirmDiscardAndPull() {
+  discardDialog.value = true
+}
+
+async function performDiscardAndPull() {
+  await onPull(true)
+}
+
 async function onPush() {
   pushing.value = true
   logText.value = ''
@@ -345,4 +521,8 @@ function timeAgo(iso: string) {
 
 .log-frame { border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; background: #0a0c0f; }
 .log { font-family: ui-monospace, Menlo, Monaco, 'Courier New', monospace; font-size: 12px; padding: 12px; white-space: pre-wrap; color: #c8cfd8; max-height: 360px; overflow-y: auto; margin: 0; }
+
+.dirty-list { margin: 0; padding-left: 20px; font-family: ui-monospace, Menlo, Monaco, 'Courier New', monospace; font-size: 12px; }
+.dirty-list li { margin: 2px 0; }
+.dirty-list .muted { opacity: 0.6; font-style: italic; list-style: none; margin-left: -20px; }
 </style>

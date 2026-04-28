@@ -20,16 +20,17 @@ public static class ProjectsEndpoints
 
     public sealed record CreateRequest(
         string Name,
-        string? PierAppName,        // optional when AutoCreateOnPier=true (we derive a slug)
-        string? PierApiToken,       // required only on the manual + import paths
-        string? PlexxerAppId,
+        string? PierAppName,        // dual-purpose: manual-flow paste field, OR slug override on auto-create
+        string? PierApiToken,       // required only on the manual + import + Pier=existing paths
+        string? PlexxerAppId,       // required when AutoCreateOnPlexxer=false on a new project + always on import
         string? PlexxerApiToken,
         string ScopeBrief,
         string? GitRemoteUrl,
         string? GitRemoteBranch,
         bool   IsImport,
         bool?  AutoCreateOnPier,    // null defaults to true on new projects (when admin configured)
-        bool?  HasFrontend);        // null defaults to true; only honoured on auto-create
+        bool?  AutoCreateOnPlexxer, // null defaults to true on new projects (when account configured)
+        bool?  HasFrontend);        // null defaults to true; only honoured on Pier auto-create
 
     public sealed record CreateResponse(
         ProjectDto Project,
@@ -50,16 +51,23 @@ public static class ProjectsEndpoints
         bool?   IntrospectionOk,
         string? IntrospectionError);
 
-    // Surfaced only on the auto-create branch. Reports what got created
-    // on Pier and how the post-create env-seed call went; lets the UI
-    // show "Created Pier app `foo`" + a green/yellow indicator.
+    // Surfaced on the auto-create branch (Pier and/or Plexxer). Reports
+    // what each side produced so the UI can render a friendly "Created X"
+    // confirmation and a green/yellow indicator on the post-create env-
+    // var seed call. Each pair of fields is null when the corresponding
+    // side wasn't auto-created (the user pasted existing creds).
     public sealed record ProvisioningReportDto(
-        string  PierAppName,
-        string  ApiBaseUrl,
-        string  ApiDomain,
+        // Pier side
+        bool    PierAutoCreated,
+        string? PierAppName,
+        string? ApiBaseUrl,
+        string? ApiDomain,
         string? FrontendDomain,
-        bool    EnvSeedOk,
-        string? EnvSeedError);
+        bool?   EnvSeedOk,
+        string? EnvSeedError,
+        // Plexxer side
+        bool    PlexxerAutoCreated,
+        string? PlexxerAppKey);
 
     public sealed record UpdateRequest(
         string? Name,
@@ -80,6 +88,7 @@ public static class ProjectsEndpoints
             ImportPierEnvMirror envMirror,
             ImportIntrospector introspector,
             PierAdminClient pierAdmin,
+            PlexxerAdminClient plexxerAdmin,
             PierEnv pierEnv,
             IHttpClientFactory httpFactory,
             ILogger<Marker> log,
@@ -120,14 +129,28 @@ public static class ProjectsEndpoints
 
             // ---- Branch selection ------------------------------------------
             // Auto-create only applies to new projects (not imports) and only
-            // when the host is configured for it. The flag defaults true on
+            // when the host is configured for it. Both flags default true on
             // new projects so the friction-free path is the default.
-            var autoCreate = !req.IsImport
-                          && pierAdmin.Configured
-                          && (req.AutoCreateOnPier ?? true);
+            var autoCreatePier    = !req.IsImport
+                                 && pierAdmin.Configured
+                                 && (req.AutoCreateOnPier ?? true);
+            var autoCreatePlexxer = !req.IsImport
+                                 && plexxerAdmin.Configured
+                                 && (req.AutoCreateOnPlexxer ?? true);
+
+            // Mutual-exclusion checks. Auto-create and pasted creds for the
+            // same provider would be ambiguous — fail loudly. We don't
+            // silently prefer one over the other because that would mask
+            // user error.
+            if (autoCreatePlexxer && hasPlexxerAppId)
+                return Results.BadRequest(new { error = "plexxer-creds-with-auto-create",
+                    message = "Plexxer auto-create is on but plexxerAppId/plexxerApiToken were also supplied. Choose one." });
+            if (autoCreatePier && !string.IsNullOrWhiteSpace(req.PierApiToken))
+                return Results.BadRequest(new { error = "pier-token-with-auto-create",
+                    message = "Pier auto-create is on but pierApiToken was also supplied. Choose one." });
 
             // Plexxer creds (when present) are verified once up-front so we
-            // fail fast before touching Pier. Same shape on every branch.
+            // fail fast before touching anything. Same shape on every branch.
             if (hasPlexxerAppId)
             {
                 var plex = await verifier.VerifyPlexxerAsync(req.PlexxerAppId!, req.PlexxerApiToken!, ct);
@@ -135,10 +158,11 @@ public static class ProjectsEndpoints
                     return Results.BadRequest(new { error = "plexxer-token-rejected", message = plex.Message });
             }
 
-            if (autoCreate)
+            if (autoCreatePier || autoCreatePlexxer)
             {
-                return await CreateWithPierAutoBootstrapAsync(
-                    req, store, pierAdmin, pierEnv, httpFactory, log,
+                return await CreateWithAutoBootstrapAsync(
+                    req, store, verifier, pierAdmin, plexxerAdmin, pierEnv, httpFactory, log,
+                    autoCreatePier, autoCreatePlexxer,
                     hasPlexxerAppId, hasPlexxerToken,
                     normalizedRemoteUrl, normalizedBranch,
                     ct);
@@ -293,13 +317,14 @@ public static class ProjectsEndpoints
             string id,
             string? confirm,
             bool? deletePierApp,
-            bool? deletePlexxerSchemas,
+            bool? deletePlexxerApp,
+            bool? forcePlexxerError,
             ProjectStore projects,
             ConversationStore turns,
             PlexxerClient plexxer,
             WorkspaceManager ws,
             PierAdminClient pierAdmin,
-            PlexxerSchemaWiper schemaWiper,
+            PlexxerAdminClient plexxerAdmin,
             ILogger<Marker> log,
             CancellationToken ct) =>
         {
@@ -318,11 +343,12 @@ public static class ProjectsEndpoints
                     message = $"Pass ?confirm={Uri.EscapeDataString(expectedPhrase)} to delete this project.",
                 });
 
-            var doPier    = deletePierApp        ?? false;
-            var doPlexxer = deletePlexxerSchemas ?? false;
+            var doPier    = deletePierApp     ?? false;
+            var doPlexxer = deletePlexxerApp  ?? false;
+            var force     = forcePlexxerError ?? false;
 
-            // Per-step report so the UI can show "Pier app deleted, 3 Plexxer
-            // schemas wiped, AiBuilder record removed". Each step appends.
+            // Per-step report so the UI can show "Pier app deleted, Plexxer
+            // app deleted, AiBuilder record removed". Each step appends.
             var pierResult    = "skipped";
             var plexxerResult = "skipped";
 
@@ -347,30 +373,38 @@ public static class ProjectsEndpoints
                 }
             }
 
-            // ---- 2. Wipe Plexxer schemas. Fail-fast on permission errors. ----
+            // ---- 2. Delete the Plexxer app (account-API). Fail-fast unless
+            // `force` is set — the override is for cases like "the user
+            // already deleted the app in Plexxer's dashboard" or "the
+            // account token doesn't have grants for this particular app".
+            // 404-already-gone is silently treated as success by
+            // PlexxerAdminClient.DeleteAppAsync, so the simple manual-delete
+            // case doesn't need force. ----
             if (doPlexxer)
             {
-                if (string.IsNullOrWhiteSpace(project.plexxerAppId) || string.IsNullOrWhiteSpace(project.plexxerApiToken))
+                if (string.IsNullOrWhiteSpace(project.plexxerAppId))
                     return Results.BadRequest(new
                     {
                         error = "plexxer-not-configured",
-                        message = "This project has no Plexxer credentials; un-tick 'Wipe the Plexxer schemas' to proceed."
+                        message = "This project has no Plexxer app id; un-tick 'Delete the Plexxer app' to proceed."
+                    });
+                if (!plexxerAdmin.Configured)
+                    return Results.BadRequest(new
+                    {
+                        error = "plexxer-account-not-configured",
+                        message = "Plexxer account token is not set on this AiBuilder host; un-tick 'Delete the Plexxer app' or configure PLEXXER_ACCOUNT_TOKEN first."
                     });
                 try
                 {
-                    var wipe = await schemaWiper.WipeAsync(project.plexxerAppId!, project.plexxerApiToken!, ct);
-                    plexxerResult = $"wiped {wipe.Deleted} schema(s); {wipe.SkippedAlreadyGone.Count} already gone";
+                    await plexxerAdmin.DeleteAppAsync(project.plexxerAppId!, ct);
+                    plexxerResult = "deleted";
                 }
-                catch (PlexxerSchemaWiper.PlexxerSchemaWipeError e)
+                catch (PlexxerAdminClient.PlexxerAdminError e)
                 {
-                    log.LogWarning("Delete project: Plexxer schema wipe failed for {AppKey} entity={Entity}: {Code}",
-                        project.plexxerAppId, e.Entity, e.Code);
-                    return Results.Problem(
-                        title: e.Code,
-                        detail: e.Entity is null
-                            ? $"Plexxer schema wipe failed (HTTP {e.Status}): {e.Detail}"
-                            : $"Plexxer schema wipe failed on entity '{e.Entity}' (HTTP {e.Status}): {e.Detail}",
-                        statusCode: e.Code is "plexxer-permission-denied" or "plexxer-token-invalid" ? 400 : 502);
+                    log.LogWarning("Delete project: Plexxer admin DELETE failed for {AppKey}: {Code} (force={Force})",
+                        project.plexxerAppId, e.Code, force);
+                    if (!force) return MapPlexxerAdminErrorToResponse(e);
+                    plexxerResult = $"force-skipped: {e.Code}";
                 }
             }
 
@@ -477,13 +511,32 @@ public static class ProjectsEndpoints
     //     Project record are both healthy — we surface a warning in
     //     the response but don't roll back; the user can re-seed via
     //     the Deploy tab manually.
-    private static async Task<IResult> CreateWithPierAutoBootstrapAsync(
+    // Combined Pier + Plexxer auto-create flow. Handles four cases:
+    //   * Pier=auto, Plexxer=auto      (the new default for new projects)
+    //   * Pier=auto, Plexxer=existing  (use the supplied plexxerAppId/Token)
+    //   * Pier=existing, Plexxer=auto  (use the supplied pierAppName/Token)
+    //   * (Pier=existing, Plexxer=existing falls through to the manual path
+    //     above and never reaches this method.)
+    //
+    // Order is **Plexxer first, Pier second** by Patrick's call. Plexxer's
+    // DELETE keys on the server-assigned appKey we just received from
+    // POST /apps; Pier's DELETE keys on a name we minted in this same call.
+    // By creating Plexxer first, a Plexxer failure means we never touched
+    // Pier at all. Hard invariant: every rollback uses an identifier from
+    // the immediately-preceding successful create, never a user-supplied
+    // or DB-read value. The tokens are powerful — we never want to touch
+    // an unrelated app by accident.
+    private static async Task<IResult> CreateWithAutoBootstrapAsync(
         CreateRequest req,
         ProjectStore store,
+        TokenVerifier verifier,
         PierAdminClient pierAdmin,
+        PlexxerAdminClient plexxerAdmin,
         PierEnv pierEnv,
         IHttpClientFactory httpFactory,
         ILogger<Marker> log,
+        bool autoCreatePier,
+        bool autoCreatePlexxer,
         bool hasPlexxerAppId,
         bool hasPlexxerToken,
         string? normalizedRemoteUrl,
@@ -492,15 +545,10 @@ public static class ProjectsEndpoints
     {
         var hasFrontend = req.HasFrontend ?? true;
 
-        // The user can supply their own slug as an override (free-form
-        // text in the form's "advanced" section). When they don't, derive
-        // one from the project name.
+        // ---- Resolve the shared slug (Pier name + Plexxer display name) ---
         string baseSlug;
         if (!string.IsNullOrWhiteSpace(req.PierAppName))
         {
-            // The override must already be Pier-valid; we don't try to
-            // re-normalise it because that would silently rewrite the
-            // user's intent. Reject loudly instead.
             if (!PierAppNameRegex.IsMatch(req.PierAppName))
                 return Results.BadRequest(new { error = "pier-app-name-invalid",
                     message = "Override must match ^[a-z][a-z0-9-]{1,30}$" });
@@ -517,83 +565,174 @@ public static class ProjectsEndpoints
             }
         }
 
-        const int maxAttempts = 5;
-        var originator = $"aibuilder/{baseSlug}";
-
-        // Find the first slug that's free both locally and on Pier. Both
-        // sides because (a) Pier may already own a name we don't track and
-        // (b) we don't want two Plexxer Projects sharing a pierAppName.
-        string? slug = null;
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        // ---- If Pier=existing, the user supplied creds — verify NOW so we
+        // don't waste a Plexxer create on a bad Pier token. ----
+        string? existingPierAppName = null;
+        string? existingPierApiToken = null;
+        if (!autoCreatePier)
         {
-            string candidate;
+            if (string.IsNullOrWhiteSpace(req.PierAppName))
+                return Results.BadRequest(new { error = "pier-app-name-required" });
+            if (!PierAppNameRegex.IsMatch(req.PierAppName))
+                return Results.BadRequest(new { error = "pier-app-name-invalid",
+                    message = "Must match ^[a-z][a-z0-9-]{1,30}$" });
+            if (string.IsNullOrWhiteSpace(req.PierApiToken))
+                return Results.BadRequest(new { error = "pier-token-required" });
+            if (await store.PierAppNameExistsAsync(req.PierAppName, ct))
+                return Results.Conflict(new { error = "pier-app-name-already-in-use" });
+            var pier = await verifier.VerifyPierAsync(req.PierAppName, req.PierApiToken, ct);
+            if (!pier.Ok)
+                return Results.BadRequest(new { error = "pier-token-rejected", message = pier.Message });
+            existingPierAppName  = req.PierAppName.Trim();
+            existingPierApiToken = req.PierApiToken;
+        }
+
+        // ---- If Plexxer=existing, pre-flight already verified above ----
+
+        // ===============================================================
+        // STEP 1: Plexxer auto-create (if requested). On any failure no
+        // rollback is needed — Pier hasn't been touched.
+        // ===============================================================
+        string? plexxerAppKey      = null;   // server-assigned, used for rollback DELETE
+        string? plexxerAppToken    = null;   // plaintext minted token, persisted on the project
+        if (autoCreatePlexxer)
+        {
             try
             {
-                candidate = attempt == 1 ? baseSlug : PierAppSlug.WithCollisionSuffix(baseSlug, attempt);
+                var created = await plexxerAdmin.CreateAppAsync(
+                    new PlexxerAdminClient.CreateAppRequest(Name: baseSlug),
+                    ct);
+                plexxerAppKey = created.AppKey;
             }
-            catch (Exception e)
+            catch (PlexxerAdminClient.PlexxerAdminError e)
             {
-                log.LogWarning(e, "Could not generate slug suffix for base '{Base}' attempt {Attempt}", baseSlug, attempt);
+                return MapPlexxerAdminErrorToResponse(e);
+            }
+
+            try
+            {
+                var minted = await plexxerAdmin.MintAppTokenAsync(
+                    plexxerAppKey,
+                    new PlexxerAdminClient.MintTokenRequest(
+                        Label: $"aibuilder-{baseSlug}",
+                        // Plexxer's app-scoped mint validator requires at
+                        // least one key that isn't `app:*` or `account:*`
+                        // (i.e. a per-entity grant). Brand-new apps have
+                        // no entities yet — chicken-and-egg — so we mint
+                        // with the sentinel `_init: rw`. Claude widens
+                        // the token via `app:tokens:rw` PATCH after
+                        // publishing schemas; the sentinel can be left in
+                        // or removed at that point. The leading
+                        // underscore guarantees no collision with a
+                        // legit user-defined entity name.
+                        Permissions: new Dictionary<string, string>
+                        {
+                            ["_init"]            = "rw",
+                            ["app:schemas"]      = "rw",
+                            ["app:tokens"]       = "rw",
+                            ["app:backups"]      = "rw",
+                            ["app:meta-samples"] = "y",
+                            ["app:client"]       = "y",
+                        }),
+                    ct);
+                plexxerAppToken = minted.PlaintextToken;
+            }
+            catch (PlexxerAdminClient.PlexxerAdminError e)
+            {
+                // Token mint failed; roll back the Plexxer app we just
+                // created. appKey came from the line above — never from
+                // user input.
+                await TryRollbackPlexxerAsync(plexxerAdmin, plexxerAppKey, log, "mint-token-failed", ct);
+                return MapPlexxerAdminErrorToResponse(e);
+            }
+        }
+
+        // ===============================================================
+        // STEP 2: Pier auto-create (if requested). On any failure, roll
+        // back the Plexxer app from step 1 (if it ran).
+        // ===============================================================
+        PierAdminClient.BootstrapResult? pierResult = null;
+        if (autoCreatePier)
+        {
+            const int maxAttempts = 5;
+            var originator = $"aibuilder/{baseSlug}";
+
+            string? slug = null;
+            for (var attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                string candidate;
+                try
+                {
+                    candidate = attempt == 1 ? baseSlug : PierAppSlug.WithCollisionSuffix(baseSlug, attempt);
+                }
+                catch (Exception e)
+                {
+                    log.LogWarning(e, "Could not generate slug suffix for base '{Base}' attempt {Attempt}", baseSlug, attempt);
+                    break;
+                }
+
+                if (await store.PierAppNameExistsAsync(candidate, ct))
+                    continue;
+
+                try
+                {
+                    if (await pierAdmin.AppExistsAsync(candidate, originator, ct))
+                        continue;
+                }
+                catch (PierAdminClient.PierAdminError e)
+                {
+                    await TryRollbackPlexxerAsync(plexxerAdmin, plexxerAppKey, log, "pier-existence-check-failed", ct);
+                    return MapAdminErrorToResponse(e);
+                }
+
+                slug = candidate;
                 break;
             }
-
-            if (await store.PierAppNameExistsAsync(candidate, ct))
-                continue;
+            if (slug is null)
+            {
+                await TryRollbackPlexxerAsync(plexxerAdmin, plexxerAppKey, log, "pier-slug-exhausted", ct);
+                return Results.Conflict(new { error = "pier-app-slug-no-free-name",
+                    message = $"Could not find an unused Pier app name after {maxAttempts} attempts. Try a different project name or set an explicit override." });
+            }
 
             try
             {
-                if (await pierAdmin.AppExistsAsync(candidate, originator, ct))
-                    continue;
+                pierResult = await pierAdmin.CreateAppAsync(
+                    new PierAdminClient.CreateAppRequest(
+                        Name:         slug,
+                        HasFrontend:  hasFrontend,
+                        Category:     "AiBuilder",
+                        MintApiToken: true),
+                    originator,
+                    ct);
             }
             catch (PierAdminClient.PierAdminError e)
             {
-                // Surface admin-API errors immediately — a 401/403/500 here
-                // means the create call would also fail, and we'd rather
-                // tell the user "your admin token is invalid" than silently
-                // race past it.
+                await TryRollbackPlexxerAsync(plexxerAdmin, plexxerAppKey, log, "pier-create-failed", ct);
                 return MapAdminErrorToResponse(e);
             }
-
-            slug = candidate;
-            break;
-        }
-        if (slug is null)
-            return Results.Conflict(new { error = "pier-app-slug-no-free-name",
-                message = $"Could not find an unused Pier app name after {maxAttempts} attempts. Try a different project name or set an explicit override." });
-
-        // ---- Reserve on Pier (the only step that could leave external state) ----
-        PierAdminClient.BootstrapResult result;
-        try
-        {
-            result = await pierAdmin.CreateAppAsync(
-                new PierAdminClient.CreateAppRequest(
-                    Name:         slug,
-                    HasFrontend:  hasFrontend,
-                    Category:     "AiBuilder",
-                    MintApiToken: true),
-                originator,
-                ct);
-        }
-        catch (PierAdminClient.PierAdminError e)
-        {
-            // No Pier app exists at this point (Pier either rejected with
-            // a 4xx pre-create or the network call never landed). Nothing
-            // to roll back.
-            return MapAdminErrorToResponse(e);
         }
 
-        // ---- Persist our Plexxer Project with the minted token ----
-        Project created;
+        // ===============================================================
+        // STEP 3: Persist the AiBuilder Project record. On failure, roll
+        // back BOTH external creates (whichever ran).
+        // ===============================================================
+        var resolvedPierAppName  = pierResult?.AppName  ?? existingPierAppName!;
+        var resolvedPierApiToken = pierResult?.ApiToken ?? existingPierApiToken!;
+        var resolvedPlexxerAppId    = autoCreatePlexxer ? plexxerAppKey   : (hasPlexxerAppId ? req.PlexxerAppId!.Trim() : null);
+        var resolvedPlexxerApiToken = autoCreatePlexxer ? plexxerAppToken : (hasPlexxerToken ? req.PlexxerApiToken    : null);
+
+        Project created2;
         try
         {
             var now = DateTime.UtcNow;
-            created = await store.CreateAsync(new Project
+            created2 = await store.CreateAsync(new Project
             {
                 name            = req.Name.Trim(),
-                pierAppName     = result.AppName,
-                pierApiToken    = result.ApiToken,
-                plexxerAppId    = hasPlexxerAppId ? req.PlexxerAppId!.Trim() : null,
-                plexxerApiToken = hasPlexxerToken ? req.PlexxerApiToken    : null,
+                pierAppName     = resolvedPierAppName,
+                pierApiToken    = resolvedPierApiToken,
+                plexxerAppId    = resolvedPlexxerAppId,
+                plexxerApiToken = resolvedPlexxerApiToken,
                 scopeBrief      = req.ScopeBrief,
                 workspaceStatus = WorkspaceStatus.Draft,
                 gitRemoteUrl    = normalizedRemoteUrl,
@@ -605,41 +744,84 @@ public static class ProjectsEndpoints
         }
         catch (Exception e)
         {
-            // We have a Pier app but no Plexxer record. Leaving an orphan
-            // is worse than a noisy error, but admin DELETE is out of
-            // scope for v1 — log loudly and surface a clear message. The
-            // user can clean up via Pier's UI; once `/admin-api/apps/{x}
-            // DELETE` is allowed for AiBuilder we'll close this gap.
+            // Both rollbacks use identifiers from the immediately-preceding
+            // successful create. Never user input, never DB lookup.
             log.LogError(e,
-                "Plexxer Project create failed AFTER Pier admin-API created app '{Slug}'. " +
-                "Pier app is orphaned and must be deleted manually via Pier's UI.",
-                result.AppName);
+                "Plexxer Project create failed after auto-bootstrap (pierAuto={PierAuto} plexxerAuto={PlexxerAuto}); rolling back",
+                autoCreatePier, autoCreatePlexxer);
+            await TryRollbackPierAsync(pierAdmin, pierResult?.AppName, log, "project-persist-failed", ct);
+            await TryRollbackPlexxerAsync(plexxerAdmin, plexxerAppKey, log, "project-persist-failed", ct);
             return Results.Problem(
-                title: "pier-app-orphaned",
-                detail: $"Pier app '{result.AppName}' was created, but persisting the AiBuilder project failed. " +
-                        $"Delete '{result.AppName}' in Pier's admin UI to retry, then try again.",
+                title: "project-persist-failed",
+                detail: "AiBuilder project record could not be persisted. Any newly-created Pier or Plexxer apps have been rolled back. Try again.",
                 statusCode: 500);
         }
 
-        // ---- Best-effort post-create env seed (PIER_API_TOKEN, PIER_API_BASE) ----
-        // Per the spec these live as env vars on the new Pier app so the
-        // running app can call its own /api/{name}/* surface if it ever
-        // needs to. They use the per-app token, not the admin token.
-        // Defer the restart per the locked decisions — first /deploy will
-        // restart organically.
-        var (envOk, envErr) = await SeedNewAppEnvAsync(httpFactory, result, log, ct);
+        // ===============================================================
+        // STEP 4: Best-effort post-create env seed on the new Pier app
+        // (only if Pier was auto-created — env seed is for the brand-new
+        // app's runtime only).
+        // ===============================================================
+        bool? envSeedOk = null;
+        string? envSeedErr = null;
+        if (pierResult is not null)
+        {
+            (envSeedOk, envSeedErr) = await SeedNewAppEnvAsync(httpFactory, pierResult, log, ct);
+        }
 
-        var dto = ToDto(created);
+        var dto = ToDto(created2);
         var report = new ProvisioningReportDto(
-            PierAppName:    result.AppName,
-            ApiBaseUrl:     result.ApiBaseUrl,
-            ApiDomain:      result.ApiDomain,
-            FrontendDomain: result.FrontendDomain,
-            EnvSeedOk:      envOk,
-            EnvSeedError:   envErr);
+            PierAutoCreated:    pierResult is not null,
+            PierAppName:        pierResult?.AppName,
+            ApiBaseUrl:         pierResult?.ApiBaseUrl,
+            ApiDomain:          pierResult?.ApiDomain,
+            FrontendDomain:     pierResult?.FrontendDomain,
+            EnvSeedOk:          envSeedOk,
+            EnvSeedError:       envSeedErr,
+            PlexxerAutoCreated: plexxerAppKey is not null,
+            PlexxerAppKey:      plexxerAppKey);
 
-        return Results.Created($"/api/projects/{created.Id}",
+        return Results.Created($"/api/projects/{created2.Id}",
             new CreateResponse(dto, null, report));
+    }
+
+    // Best-effort Pier rollback. Logs (does not throw) on failure so the
+    // caller can still surface the *original* error to the client. Skips
+    // when there's nothing to delete. Uses ONLY the appName from a
+    // successful CreateAppAsync — never a user-supplied or DB-read value.
+    private static async Task TryRollbackPierAsync(PierAdminClient pierAdmin, string? appName, ILogger log, string reason, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(appName)) return;
+        try
+        {
+            await pierAdmin.DeleteAppAsync(appName, $"aibuilder/{appName}", ct);
+            log.LogInformation("Rolled back Pier app '{App}' after {Reason}", appName, reason);
+        }
+        catch (Exception e)
+        {
+            log.LogError(e,
+                "Pier rollback FAILED for app '{App}' after {Reason}. Manual cleanup required via Pier's admin UI.",
+                appName, reason);
+        }
+    }
+
+    // Best-effort Plexxer rollback. Same invariant: appKey comes from a
+    // successful CreateAppAsync, never user input.
+    private static async Task TryRollbackPlexxerAsync(PlexxerAdminClient plexxerAdmin, string? appKey, ILogger log, string reason, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(appKey)) return;
+        try
+        {
+            await plexxerAdmin.DeleteAppAsync(appKey, ct);
+            log.LogInformation("Rolled back Plexxer app (appKey ends in {LastFour}) after {Reason}",
+                appKey.Length >= 4 ? appKey[^4..] : appKey, reason);
+        }
+        catch (Exception e)
+        {
+            log.LogError(e,
+                "Plexxer rollback FAILED for appKey ending in {LastFour} after {Reason}. Manual cleanup required via Plexxer's UI.",
+                appKey.Length >= 4 ? appKey[^4..] : appKey, reason);
+        }
     }
 
     private static async Task<(bool ok, string? error)> SeedNewAppEnvAsync(
@@ -697,6 +879,42 @@ public static class ProjectsEndpoints
             Results.Problem(title: e.Code, detail: "Pier admin-API is unreachable from this host. Verify PIER_ADMIN_BASE and network.", statusCode: 502),
         _ =>
             Results.Problem(title: e.Code, detail: $"Unexpected admin-API failure (HTTP {e.Status}).", statusCode: 502),
+    };
+
+    // Plexxer-side equivalent of MapAdminErrorToResponse. Stable code +
+    // scrubbed detail; never echoes the account token. The
+    // `plexxer-account-ip-not-allowed` and `-grants-insufficient` codes
+    // come from PlexxerAdminClient pulling the inner `error` field of
+    // Plexxer's 403 envelope so we can disambiguate the two common
+    // misconfigurations.
+    private static IResult MapPlexxerAdminErrorToResponse(PlexxerAdminClient.PlexxerAdminError e) => e.Code switch
+    {
+        "plexxer-account-not-configured" =>
+            Results.Problem(title: e.Code,
+                detail: "PLEXXER_ACCOUNT_TOKEN is not set on this AiBuilder host; configure it in Pier env vars to enable Plexxer auto-create.",
+                statusCode: 503),
+        "plexxer-account-token-invalid" =>
+            Results.Problem(title: e.Code,
+                detail: "Plexxer rejected the account token. Mint a fresh one in Plexxer's dashboard and update PLEXXER_ACCOUNT_TOKEN.",
+                statusCode: 502),
+        "plexxer-account-ip-not-allowed" =>
+            Results.Problem(title: e.Code,
+                detail: "Plexxer rejected the request because this AiBuilder host's IP isn't on the account token's allowlist. Widen the allowlist or remint the token without one.",
+                statusCode: 502),
+        "plexxer-account-grants-insufficient" =>
+            Results.Problem(title: e.Code,
+                detail: "Plexxer rejected the request because the account token lacks required grants. Need account:apps:w + account:tokens:w.",
+                statusCode: 502),
+        "plexxer-name-conflict" =>
+            Results.Conflict(new { error = e.Code, message = "Plexxer reports the requested name is already taken." }),
+        "plexxer-validation-failed" =>
+            Results.BadRequest(new { error = e.Code, message = e.Detail }),
+        "plexxer-rate-limited" =>
+            Results.Problem(title: e.Code, detail: "Plexxer rate limit reached; try again shortly.", statusCode: 503),
+        "plexxer-account-unreachable" =>
+            Results.Problem(title: e.Code, detail: "Plexxer is unreachable from this host. Verify PLEXXER_ACCOUNT_BASE and network.", statusCode: 502),
+        _ =>
+            Results.Problem(title: e.Code, detail: $"Unexpected Plexxer admin-API failure (HTTP {e.Status}).", statusCode: 502),
     };
 
     private static async Task<Project?> SafeAfterPatchAsync(ProjectStore store, string id, CancellationToken ct) =>

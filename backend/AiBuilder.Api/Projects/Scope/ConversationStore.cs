@@ -44,4 +44,11 @@ public sealed class ConversationStore
             createdAt = DateTime.UtcNow,
         }, ct);
     }
+
+    public async Task<long> ClearAsync(string projectId, CancellationToken ct = default)
+    {
+        var result = await _plexxer.DeleteAsync<ConversationTurn>(
+            new Dictionary<string, object?> { ["project:eq"] = projectId }, ct);
+        return result.Deleted;
+    }
 }

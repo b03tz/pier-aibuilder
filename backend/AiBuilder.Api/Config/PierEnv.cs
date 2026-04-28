@@ -9,6 +9,8 @@ public sealed record PierEnv(
     string? PierAdminToken,
     string PierAdminBase,
     string PierAdminHost,
+    string? PlexxerAccountToken,
+    string PlexxerAccountBase,
     bool Prod)
 {
     // Whether the "Create project on Pier" auto-bootstrap feature is
@@ -16,17 +18,22 @@ public sealed record PierEnv(
     // a sensible default so it isn't part of the gate.
     public bool PierAdminConfigured => !string.IsNullOrWhiteSpace(PierAdminToken);
 
+    // Whether the "Create database on Plexxer" auto-bootstrap feature is
+    // enabled. Mirrors the Pier admin gate: presence of an account token
+    // is the only signal; the base URL has a sensible default.
+    public bool PlexxerAccountConfigured => !string.IsNullOrWhiteSpace(PlexxerAccountToken);
+
     // Last four chars of the admin token, for display purposes only.
     // Returns null when the token isn't set. Never use the full token in
     // log lines or UI strings — only this masked form.
-    public string? PierAdminTokenLastFour
+    public string? PierAdminTokenLastFour => LastFour(PierAdminToken);
+
+    public string? PlexxerAccountTokenLastFour => LastFour(PlexxerAccountToken);
+
+    private static string? LastFour(string? t)
     {
-        get
-        {
-            var t = PierAdminToken;
-            if (string.IsNullOrEmpty(t) || t.Length < 4) return null;
-            return t[^4..];
-        }
+        if (string.IsNullOrEmpty(t) || t.Length < 4) return null;
+        return t[^4..];
     }
 
     public static PierEnv LoadOrThrow()
@@ -69,6 +76,14 @@ public sealed record PierEnv(
             PierAdminBase:   (Environment.GetEnvironmentVariable("PIER_ADMIN_BASE") ?? "http://127.0.0.1:8080")
                                 .TrimEnd('/'),
             PierAdminHost:   Environment.GetEnvironmentVariable("PIER_ADMIN_HOST") ?? "admin.onpier.tech",
+            // Plexxer account-API integration. Same gate pattern as Pier:
+            // the token alone enables the feature, the base URL is just a
+            // pointer at the multi-tenant SaaS host. Plexxer does not
+            // gate by Host header (unlike Pier's loopback admin surface),
+            // so there's no PLEXXER_ACCOUNT_HOST equivalent.
+            PlexxerAccountToken: Environment.GetEnvironmentVariable("PLEXXER_ACCOUNT_TOKEN"),
+            PlexxerAccountBase:  (Environment.GetEnvironmentVariable("PLEXXER_ACCOUNT_BASE") ?? "https://api.plexxer.com")
+                                    .TrimEnd('/'),
             Prod:            !string.Equals(aspEnv, "Development", StringComparison.OrdinalIgnoreCase));
     }
 }

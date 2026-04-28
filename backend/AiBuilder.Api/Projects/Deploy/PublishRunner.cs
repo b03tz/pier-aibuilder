@@ -89,8 +89,8 @@ public sealed class PublishRunner
         return new RunOutput(p.ExitCode, outBuf.ToString(), errBuf.ToString());
     }
 
-    public Task<RunOutput> DotnetPublishAsync(string backendDir, string outputDir, CancellationToken ct) =>
-        RunAsync("dotnet", new[] { "publish", "-c", "Release", "-o", outputDir, "--nologo" }, backendDir, ct);
+    public Task<RunOutput> DotnetPublishAsync(string projectPath, string cwd, string outputDir, CancellationToken ct) =>
+        RunAsync("dotnet", new[] { "publish", projectPath, "-c", "Release", "-o", outputDir, "--nologo" }, cwd, ct);
 
     public async Task<RunOutput> NpmInstallAndBuildAsync(string frontendDir, CancellationToken ct)
     {

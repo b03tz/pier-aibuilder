@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using AiBuilder.Api.Projects.Deploy;
+using AiBuilder.Api.Projects.Import;
 using Plexxer.Client.AiBuilder;
 
 namespace AiBuilder.Api.Projects.Scope;
@@ -101,6 +103,74 @@ public static class ScopeEndpoints
 
             await projects.SetStatusAsync(id, project.workspaceStatus, WorkspaceStatus.ScopeLocked, ct);
             return Results.Ok(new { id, workspaceStatus = WorkspaceStatus.ScopeLocked });
+        });
+
+        // Wipe the scope conversation for a project. Distinct from Reset
+        // (which also nukes workspace files, builds, deploys, env vars).
+        // Clear-scope leaves the deployed app alone — it's the "I shipped
+        // a chunk, now starting a fresh conversation for the next idea"
+        // affordance. For imported projects we re-run introspection so
+        // the next conversation has a current codebase summary that
+        // catches edits made to the import from outside AiBuilder.
+        group.MapPost("/clear-scope", async (
+            string id,
+            ProjectStore projects,
+            ConversationStore conv,
+            DeployRunStore deploys,
+            ImportIntrospector introspector,
+            CancellationToken ct) =>
+        {
+            var project = await projects.GetSafeAsync(id, ct);
+            if (project is null) return Results.NotFound();
+
+            var s = project.workspaceStatus;
+            if (s != WorkspaceStatus.Draft && s != WorkspaceStatus.InConversation && s != WorkspaceStatus.Deployed)
+                return Results.Conflict(new { error = "scope-busy", currentStatus = s });
+
+            // Use the same per-project semaphore /turns uses, so a clear
+            // can't race a turn that's mid-flight in claude.
+            var sem = ProjectLocks.GetOrAdd(id, _ => new SemaphoreSlim(1, 1));
+            await sem.WaitAsync(ct);
+            try
+            {
+                var deleted = await conv.ClearAsync(id, ct);
+
+                bool? reintrospected = null;
+                if (project.isImported == true)
+                {
+                    var r = await introspector.RunAsync(id, project.pierAppName, ct);
+                    reintrospected = r.Ok;
+                }
+
+                // Decide post-clear status. "Shipped, idle" = Deployed if
+                // any successful deploy exists; otherwise stay Draft.
+                // Bypass the state machine — InConversation→Deployed and
+                // Deployed→Draft aren't valid transitions, this is an
+                // explicit admin override (mirrors how Reset bypasses).
+                var deployRuns = await deploys.ListForProjectAsync(id, ct);
+                var hasSuccessfulDeploy = deployRuns.Any(r => r.status == "succeeded");
+                var newStatus = hasSuccessfulDeploy ? WorkspaceStatus.Deployed : WorkspaceStatus.Draft;
+
+                if (newStatus != s)
+                {
+                    await projects.UpdateFieldsAsync(id, new Dictionary<string, object?>
+                    {
+                        ["workspaceStatus"] = newStatus,
+                    }, ct);
+                }
+
+                return Results.Ok(new
+                {
+                    id,
+                    workspaceStatus = newStatus,
+                    deleted,
+                    reintrospected,
+                });
+            }
+            finally
+            {
+                sem.Release();
+            }
         });
 
         group.MapPost("/unlock-scope", async (string id, ProjectStore projects, CancellationToken ct) =>

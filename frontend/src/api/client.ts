@@ -76,15 +76,21 @@ export interface ImportReportDto {
   introspectionError: string | null
 }
 
-// Surfaced only on auto-create. Reports the bootstrapped Pier app and
-// whether the post-create env seed (PIER_API_TOKEN/BASE) succeeded.
+// Surfaced on the auto-create branch (Pier and/or Plexxer). Each pair of
+// fields is null when the corresponding side wasn't auto-created (the
+// user pasted existing creds for that side).
 export interface ProvisioningReportDto {
-  pierAppName: string
-  apiBaseUrl: string
-  apiDomain: string
+  // Pier side
+  pierAutoCreated: boolean
+  pierAppName: string | null
+  apiBaseUrl: string | null
+  apiDomain: string | null
   frontendDomain: string | null
-  envSeedOk: boolean
+  envSeedOk: boolean | null
   envSeedError: string | null
+  // Plexxer side
+  plexxerAutoCreated: boolean
+  plexxerAppKey: string | null
 }
 
 export interface CreateProjectResponse {
@@ -93,14 +99,17 @@ export interface CreateProjectResponse {
   provisioning: ProvisioningReportDto | null
 }
 
-// GET /api/_pier-admin/status — used by the Settings page and by NewProject
-// to decide whether to enable the "Create project on Pier" checkbox. Never
-// includes the full token; only the last four chars for spot-check display.
+// GET /api/_pier-admin/status + /api/_plexxer-admin/status — used by the
+// Settings page and NewProject to decide whether to enable the "Create
+// new" toggles. Same shape on both sides; never includes the full token,
+// only the last four chars for spot-check display.
 export interface PierAdminStatusDto {
   configured: boolean
   base: string
   tokenLastFour: string | null
 }
+
+export type PlexxerAdminStatusDto = PierAdminStatusDto
 
 export interface TurnDto {
   id: string
@@ -167,4 +176,16 @@ export interface CloneResponse {
   envMirrorError: string | null
   introspectionOk: boolean | null
   introspectionError: string | null
+}
+
+export interface PullResponse {
+  ok: boolean
+  errorCode: string | null
+  errorMessage: string | null
+  previousSha: string | null
+  newSha: string | null
+  filesChanged: number
+  uncommittedFiles: string[]
+  output: string
+  state: VcsStateDto | null
 }
